@@ -1,0 +1,46 @@
+{
+  "name": "@boy-offi9-inc/reqkit",
+  "version": "0.1.0",
+  "description": "Small, composable HTTP helper functions — retry with backoff, timeouts, normalized errors, safe JSON parsing, rate-limit-aware retry, and download progress. Not a client, works alongside fetch/axios/anything.",
+  "main": "./src/index.js",
+  "types": "./types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "require": "./src/index.js",
+      "import": "./src/index.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "test": "node --test",
+  },
+  "keywords": [
+    "http",
+    "fetch",
+    "retry",
+    "backoff",
+    "timeout",
+    "rate-limit",
+    "retry-after",
+    "download-progress",
+    "error-normalization",
+    "utility"
+  ],
+  "author": "Boy Offi9",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "src",
+    "types",
+    "README.md",
+    "LICENSE",
+    "assets"
+  ]
+}
