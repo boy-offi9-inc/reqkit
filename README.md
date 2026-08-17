@@ -15,7 +15,7 @@
 
 # reqkit
 
-Small, composable HTTP helper functions. Not a client, not an axios replacement — works alongside `fetch`, `axios`, or anything else you're already using. Pull in the one function you need; igno[...]
+Small, composable HTTP helper functions. Not a client, not an axios replacement — works alongside `fetch`, `axios`, or anything else you're already using. Pull in the one function you need; ignore the rest.
 
 ```js
 const { withRetry, normalizeError } = require("@boy-offi9-inc/reqkit");
@@ -27,11 +27,11 @@ const data = await withRetry(() => fetch(url).then(r => r.json()));
 
 ## Why this exists
 
-Most HTTP retry/timeout wrappers bundle everything into a client you have to fully adopt. This is the opposite: standalone functions that compose with whatever you're already using, and a couple o[...]
+Most HTTP retry/timeout wrappers bundle everything into a client you have to fully adopt. This is the opposite: standalone functions that compose with whatever you're already using, and a couple of small helpers that you can pick up independently.
 
-**Honest note:** `withRetry`, `withTimeout`, and `normalizeError` solve a well-covered problem — there are other solid packages doing similar things (`fetchy`, `fetchpilot`, `p-retry`, to name a[...]
+**Honest note:** `withRetry`, `withTimeout`, and `normalizeError` solve a well-covered problem — there are other solid packages doing similar things (`fetchy`, `fetchpilot`, `p-retry`, to name a few).
 
-- **`retryAfterAware`** — actually reads `Retry-After`/`X-RateLimit-Reset` headers instead of blind backoff on 429s. Most retry libraries treat rate-limit responses like any other failure and ig[...]
+- **`retryAfterAware`** — actually reads `Retry-After`/`X-RateLimit-Reset` headers instead of blind backoff on 429s. Most retry libraries treat rate-limit responses like any other failure and ignore the server's suggested retry time.
 - **`withProgress`** — progress callback for any streamed response body (downloads, large payloads, anything), not tied to a specific HTTP client.
 
 Zero dependencies. CJS + ESM. TypeScript types included.
@@ -138,7 +138,7 @@ const bytes = await withProgress(response, ({ loaded, total, percent }) => {
 });
 ```
 
-Works without `Content-Length` too — `total`/`percent` are just `null` in that case, `loaded` is still accurate. Falls back to a single-shot read (still calling `onProgress` once) if the respon[...]
+Works without `Content-Length` too — `total`/`percent` are just `null` in that case, `loaded` is still accurate. Falls back to a single-shot read (still calling `onProgress` once) if the response body is not a stream.
 
 ---
 
