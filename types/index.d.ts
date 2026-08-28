@@ -4,6 +4,11 @@ export interface RetryOptions {
   maxDelayMs?: number;
   shouldRetry?: (err: unknown, attempt: number) => boolean;
   onRetry?: (err: unknown, attempt: number, delayMs: number) => void;
+  signal?: AbortSignal;
+}
+
+export class RetryAbortedError extends Error {
+  name: "RetryAbortedError";
 }
 
 export function withRetry<T>(fn: (attempt: number) => Promise<T>, opts?: RetryOptions): Promise<T>;
@@ -61,3 +66,12 @@ export function withProgress(
   response: Response,
   onProgress?: (progress: DownloadProgress) => void
 ): Promise<Uint8Array>;
+
+export interface DedupeOptions {
+  keyFn?: (...args: any[]) => string;
+}
+
+export function withDedupe<Fn extends (...args: any[]) => Promise<any>>(
+  fn: Fn,
+  opts?: DedupeOptions
+): Fn;

@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { withRetry } = require("../src/withRetry");
+const { withRetry, RetryAbortedError } = require("../src/withRetry");
 
 test("withRetry resolves immediately if fn succeeds first try", async () => {
   let calls = 0;
@@ -76,4 +76,54 @@ test("withRetry calls onRetry with attempt info", async () => {
   assert.equal(retryLog.length, 2);
   assert.equal(retryLog[0].attempt, 0);
   assert.equal(retryLog[1].attempt, 1);
+});
+
+test("withRetry rejects immediately if the signal is already aborted", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+
+  await assert.rejects(
+    () =>
+      withRetry(async () => {
+        calls++;
+        return "ok";
+      }, { signal: controller.signal }),
+    RetryAbortedError
+  );
+  assert.equal(calls, 0);
+});
+
+test("withRetry stops retrying once aborted mid-backoff", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+
+  const promise = withRetry(
+    async () => {
+      calls++;
+      throw new Error("always fails");
+    },
+    { retries: 5, baseDelayMs: 50, signal: controller.signal }
+  );
+
+  // Let the first attempt fail and enter its backoff wait, then abort.
+  setTimeout(() => controller.abort(), 10);
+
+  await assert.rejects(() => promise, RetryAbortedError);
+  assert.equal(calls, 1);
+});
+
+test("withRetry succeeds normally when a signal is provided but never aborted", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const result = await withRetry(
+    async () => {
+      calls++;
+      if (calls < 2) throw new Error("fail once");
+      return "ok";
+    },
+    { retries: 3, baseDelayMs: 1, signal: controller.signal }
+  );
+  assert.equal(result, "ok");
+  assert.equal(calls, 2);
 });

@@ -2,6 +2,7 @@ import reqkit from "./index.js";
 
 export const {
   withRetry,
+  RetryAbortedError,
   withTimeout,
   TimeoutError,
   normalizeError,
@@ -11,6 +12,7 @@ export const {
   parseRetryAfter,
   getWaitMsFromHeaders,
   withProgress,
+  withDedupe,
 } = reqkit;
 
 export default reqkit;

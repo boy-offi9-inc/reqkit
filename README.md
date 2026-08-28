@@ -33,6 +33,7 @@ Most HTTP retry/timeout wrappers bundle everything into a client you have to ful
 
 - **`retryAfterAware`** — actually reads `Retry-After`/`X-RateLimit-Reset` headers instead of blind backoff on 429s. Most retry libraries treat rate-limit responses like any other failure and ignore the server's suggested retry time.
 - **`withProgress`** — progress callback for any streamed response body (downloads, large payloads, anything), not tied to a specific HTTP client.
+- **`withDedupe`** — coalesces concurrent calls with the same key into one in-flight call, so simultaneous requests for the same resource don't each hit the network.
 
 Zero dependencies. CJS + ESM. TypeScript types included.
 
@@ -66,6 +67,14 @@ const data = await withRetry(
 | `maxDelayMs` | `10000` | delay ceiling |
 | `shouldRetry` | retries anything but AbortError | `(err, attempt) => boolean` |
 | `onRetry` | — | `(err, attempt, delayMs) => void` |
+| `signal` | — | `AbortSignal` — cancels the whole retry loop, including any pending backoff wait, throwing `RetryAbortedError` |
+
+```js
+// Cancel a long retry/backoff sequence externally — e.g. the user navigated away
+const controller = new AbortController();
+const promise = withRetry(() => fetch(url), { retries: 5, signal: controller.signal });
+controller.abort(); // rejects with RetryAbortedError, even mid-backoff
+```
 
 ### `withTimeout(fn, ms)`
 
@@ -139,6 +148,28 @@ const bytes = await withProgress(response, ({ loaded, total, percent }) => {
 ```
 
 Works without `Content-Length` too — `total`/`percent` are just `null` in that case, `loaded` is still accurate. Falls back to a single-shot read (still calling `onProgress` once) if the response body is not a stream.
+
+### `withDedupe(fn, opts?)`
+
+Coalesces concurrent calls with the same arguments into a single in-flight call — every caller gets the same result, but the underlying request only fires once. Useful when several parts of a UI ask for the same resource around the same time.
+
+```js
+const getUser = withDedupe((id) => fetch(`/api/users/${id}`).then(r => r.json()));
+
+// Only one network request goes out — both callers share it.
+const [a, b] = await Promise.all([getUser(1), getUser(1)]);
+```
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `keyFn` | `(...args) => JSON.stringify(args)` | derives the dedupe key from call args |
+
+This is deduplication of *concurrent* calls, not a cache — once a call settles (success or failure), the next call with the same key starts fresh.
+
+```js
+// Custom key when the default arg-based key isn't quite right
+const fn = withDedupe((req) => doFetch(req), { keyFn: (req) => req.url });
+```
 
 ---
 

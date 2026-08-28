@@ -5,20 +5,47 @@ function defaultShouldRetry(err) {
   return Boolean(err) && err.name !== "AbortError";
 }
 
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+class RetryAbortedError extends Error {
+  constructor() {
+    super("Retry loop was aborted");
+    this.name = "RetryAbortedError";
+  }
+}
+
+function delay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new RetryAbortedError());
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    if (signal) {
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(new RetryAbortedError());
+        },
+        { once: true }
+      );
+    }
+  });
 }
 
 /**
  * Retries an async function with exponential backoff + jitter.
  *
- * @param {() => Promise<any>} fn
+ * @param {(attempt: number) => Promise<any>} fn
  * @param {object} [opts]
  * @param {number} [opts.retries=3] - max retry attempts after the first try
  * @param {number} [opts.baseDelayMs=300] - initial delay
  * @param {number} [opts.maxDelayMs=10000] - delay ceiling
  * @param {(err: any, attempt: number) => boolean} [opts.shouldRetry]
  * @param {(err: any, attempt: number, delayMs: number) => void} [opts.onRetry]
+ * @param {AbortSignal} [opts.signal] - cancels the whole retry loop,
+ *   including any pending backoff wait, throwing RetryAbortedError. This is
+ *   separate from a per-call AbortSignal you might pass into `fn` yourself —
+ *   this one governs whether *another attempt starts at all*.
  */
 async function withRetry(fn, opts = {}) {
   const {
@@ -27,10 +54,14 @@ async function withRetry(fn, opts = {}) {
     maxDelayMs = 10000,
     shouldRetry = defaultShouldRetry,
     onRetry,
+    signal,
   } = opts;
 
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (signal?.aborted) {
+      throw new RetryAbortedError();
+    }
     try {
       return await fn(attempt);
     } catch (err) {
@@ -43,10 +74,10 @@ async function withRetry(fn, opts = {}) {
       const jitter = Math.random() * exponential * 0.2;
       const waitMs = Math.round(exponential + jitter);
       if (onRetry) onRetry(err, attempt, waitMs);
-      await delay(waitMs);
+      await delay(waitMs, signal);
     }
   }
   throw lastErr;
 }
 
-module.exports = { withRetry };
+module.exports = { withRetry, RetryAbortedError };

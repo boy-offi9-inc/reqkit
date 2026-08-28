@@ -1,6 +1,6 @@
 {
   "name": "@boy-offi9-inc/reqkit",
-  "version": "0.1.2",
+  "version": "0.1.7",
   "description": "Small, composable HTTP helper functions — retry with backoff, timeouts, normalized errors, safe JSON parsing, rate-limit-aware retry, and download progress. Not a client, works alongside fetch/axios/anything.",
   "main": "./src/index.js",
   "types": "./types/index.d.ts",
@@ -40,7 +40,6 @@
     "src",
     "types",
     "README.md",
-    "LICENSE",
-    "assets"
+    "LICENSE"
   ]
 }
