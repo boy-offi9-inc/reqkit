@@ -1,35 +1,10 @@
+const { RetryAbortedError, sleep } = require("./_sleep");
+
 function defaultShouldRetry(err) {
   // Retry network-level failures by default. HTTP status handling is the
   // caller's job (they know what "failure" means for their response shape) —
   // see retryAfterAware.js for a version that understands status codes.
   return Boolean(err) && err.name !== "AbortError";
-}
-
-class RetryAbortedError extends Error {
-  constructor() {
-    super("Retry loop was aborted");
-    this.name = "RetryAbortedError";
-  }
-}
-
-function delay(ms, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new RetryAbortedError());
-      return;
-    }
-    const timer = setTimeout(resolve, ms);
-    if (signal) {
-      signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timer);
-          reject(new RetryAbortedError());
-        },
-        { once: true }
-      );
-    }
-  });
 }
 
 /**
@@ -60,7 +35,7 @@ async function withRetry(fn, opts = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (signal?.aborted) {
-      throw new RetryAbortedError();
+      throw new RetryAbortedError(lastErr);
     }
     try {
       return await fn(attempt);
@@ -74,7 +49,7 @@ async function withRetry(fn, opts = {}) {
       const jitter = Math.random() * exponential * 0.2;
       const waitMs = Math.round(exponential + jitter);
       if (onRetry) onRetry(err, attempt, waitMs);
-      await delay(waitMs, signal);
+      await sleep(waitMs, signal, err);
     }
   }
   throw lastErr;

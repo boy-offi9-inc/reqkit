@@ -93,3 +93,52 @@ test("withDedupe supports a custom keyFn", async () => {
   assert.equal(a, "/x");
   assert.equal(b, "/x");
 });
+
+test("withDedupe does not merge calls that carry different AbortSignals", async () => {
+  let calls = 0;
+  const fn = withDedupe(async () => {
+    calls++;
+    return delay(10, "ok");
+  });
+  const a = new AbortController();
+  const b = new AbortController();
+
+  await Promise.all([fn({ signal: a.signal }), fn({ signal: b.signal })]);
+  assert.equal(calls, 2);
+});
+
+test("withDedupe still merges calls that share the same AbortSignal", async () => {
+  let calls = 0;
+  const fn = withDedupe(async () => {
+    calls++;
+    return delay(10, "ok");
+  });
+  const a = new AbortController();
+
+  await Promise.all([fn({ signal: a.signal, id: 1 }), fn({ id: 1, signal: a.signal })]);
+  assert.equal(calls, 1);
+});
+
+test("withDedupe ignores plain-object key order", async () => {
+  let calls = 0;
+  const fn = withDedupe(async () => {
+    calls++;
+    return delay(10, "ok");
+  });
+
+  await Promise.all([fn({ a: 1, b: { x: 1, y: 2 } }), fn({ b: { y: 2, x: 1 }, a: 1 })]);
+  assert.equal(calls, 1);
+});
+
+test("withDedupe handles bigint and circular args without throwing", async () => {
+  let calls = 0;
+  const fn = withDedupe(async () => {
+    calls++;
+    return delay(10, "ok");
+  });
+  const circular = {};
+  circular.self = circular;
+
+  await Promise.all([fn(1n), fn(1n), fn(circular), fn(circular)]);
+  assert.equal(calls, 2);
+});

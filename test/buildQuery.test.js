@@ -23,3 +23,27 @@ test("buildQuery handles empty/null input", () => {
   assert.equal(buildQuery(undefined), "");
   assert.equal(buildQuery({}), "");
 });
+
+test("buildQuery serializes Dates as ISO 8601", () => {
+  assert.equal(buildQuery({ since: new Date(0) }), "since=1970-01-01T00%3A00%3A00.000Z");
+});
+
+test("buildQuery serializes arrays of Dates", () => {
+  assert.equal(
+    buildQuery({ d: [new Date(0), new Date(1000)] }),
+    "d=1970-01-01T00%3A00%3A00.000Z&d=1970-01-01T00%3A00%3A01.000Z"
+  );
+});
+
+test("buildQuery throws on nested objects instead of emitting [object Object]", () => {
+  assert.throws(() => buildQuery({ filter: { a: 1 } }), /filter/);
+  assert.throws(() => buildQuery({ list: [{ a: 1 }] }), /list/);
+});
+
+test("buildQuery throws on invalid Dates", () => {
+  assert.throws(() => buildQuery({ d: new Date("nope") }), /invalid Date/);
+});
+
+test("buildQuery still handles booleans, numbers and bigint", () => {
+  assert.equal(buildQuery({ a: true, b: 0, c: 10n }), "a=true&b=0&c=10");
+});

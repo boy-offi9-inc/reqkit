@@ -1,20 +1,26 @@
 {
   "name": "@boy-offi9-inc/reqkit",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "description": "Small, composable HTTP helper functions — retry with backoff, timeouts, normalized errors, safe JSON parsing, rate-limit-aware retry, and download progress. Not a client, works alongside fetch/axios/anything.",
   "main": "./src/index.js",
   "types": "./types/index.d.ts",
   "exports": {
     ".": {
-      "types": "./types/index.d.ts",
-      "require": "./src/index.js",
-      "import": "./src/index.mjs"
+      "import": {
+        "types": "./types/index.d.mts",
+        "default": "./src/index.mjs"
+      },
+      "require": {
+        "types": "./types/index.d.ts",
+        "default": "./src/index.js"
+      }
     },
     "./package.json": "./package.json"
   },
   "sideEffects": false,
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "typecheck": "tsc -p tsconfig.json"
   },
   "keywords": [
     "http",
@@ -30,6 +36,14 @@
   ],
   "author": "Boy Offi9",
   "license": "MIT",
+  "homepage": "https://github.com/boy-offi9-inc/reqkit#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boy-offi9-inc/reqkit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/boy-offi9-inc/reqkit/issues"
+  },
   "publishConfig": {
     "access": "public"
   },
@@ -41,5 +55,8 @@
     "types",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
 }

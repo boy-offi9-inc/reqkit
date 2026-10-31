@@ -1,10 +1,45 @@
+// Non-plain objects (AbortSignal, Response, class instances, functions...)
+// can't be meaningfully JSON-serialized — JSON.stringify turns every
+// AbortSignal into "{}", which would make unrelated calls share one request.
+// Give them a stable identity-based id instead.
+const identityIds = new WeakMap();
+let nextIdentityId = 1;
+
+function identityOf(value) {
+  let id = identityIds.get(value);
+  if (id === undefined) {
+    id = nextIdentityId++;
+    identityIds.set(value, id);
+  }
+  return id;
+}
+
+function isPlainObject(value) {
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function keyReplacer(_key, value) {
+  if (typeof value === "bigint") return { $bigint: String(value) };
+  if (typeof value === "function") return { $ref: identityOf(value) };
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value;
+  if (!isPlainObject(value)) return { $ref: identityOf(value) };
+
+  // Sort plain-object keys so {a:1,b:2} and {b:2,a:1} dedupe together.
+  const sorted = {};
+  for (const k of Object.keys(value).sort()) sorted[k] = value[k];
+  return sorted;
+}
+
 function defaultKeyFn(...args) {
   try {
-    return JSON.stringify(args);
+    return JSON.stringify(args, keyReplacer);
   } catch {
-    // Fall back to a stable-ish key if args aren't JSON-serializable
-    // (e.g. contain a function or circular ref).
-    return args.map((a) => String(a)).join("|");
+    // Circular structures etc. Fall back to identity for objects.
+    return args
+      .map((a) => ((a && typeof a === "object") || typeof a === "function" ? `#${identityOf(a)}` : String(a)))
+      .join("|");
   }
 }
 
@@ -22,7 +57,10 @@ function defaultKeyFn(...args) {
  * @param {(...args: any[]) => Promise<any>} fn
  * @param {object} [opts]
  * @param {(...args: any[]) => string} [opts.keyFn] - derives a dedupe key
- *   from the call arguments. Defaults to JSON.stringify(args).
+ *   from the call arguments. By default plain data is compared by value
+ *   (object key order doesn't matter) and anything else — AbortSignals,
+ *   Responses, class instances, functions — by identity, so two calls with
+ *   different AbortSignals are never merged.
  * @returns {(...args: any[]) => Promise<any>}
  */
 function withDedupe(fn, opts = {}) {

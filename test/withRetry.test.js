@@ -127,3 +127,17 @@ test("withRetry succeeds normally when a signal is provided but never aborted", 
   assert.equal(result, "ok");
   assert.equal(calls, 2);
 });
+
+test("RetryAbortedError carries the last failure as `cause`", async () => {
+  const { withRetry, RetryAbortedError } = require("../src/withRetry");
+  const controller = new AbortController();
+  const boom = new Error("boom");
+  const promise = withRetry(
+    async () => {
+      throw boom;
+    },
+    { retries: 3, baseDelayMs: 50, signal: controller.signal }
+  );
+  setTimeout(() => controller.abort(), 10);
+  await assert.rejects(promise, (err) => err instanceof RetryAbortedError && err.cause === boom);
+});

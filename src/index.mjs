@@ -12,6 +12,7 @@ export const {
   parseRetryAfter,
   getWaitMsFromHeaders,
   withProgress,
+  BodyTooLargeError,
   withDedupe,
 } = reqkit;
 

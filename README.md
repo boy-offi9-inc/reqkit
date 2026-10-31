@@ -76,6 +76,8 @@ const promise = withRetry(() => fetch(url), { retries: 5, signal: controller.sig
 controller.abort(); // rejects with RetryAbortedError, even mid-backoff
 ```
 
+> **Heads up:** `fetch` doesn't throw on 4xx/5xx, so `withRetry` alone won't retry a `500`. Throw inside `fn` for the statuses you care about (`if (!r.ok) throw ...`), or use `retryAfterAware` below, which retries on status codes.
+
 ### `withTimeout(fn, ms)`
 
 Races an async function against a timeout, passing it an `AbortSignal` so the underlying request can actually be cancelled.
@@ -93,8 +95,10 @@ const data = await withTimeout(
 One consistent error shape regardless of source (fetch, axios, node http, generic):
 
 ```js
-const { message, status, code, isNetworkError, isTimeout } = normalizeError(err);
+const { message, status, code, isNetworkError, isTimeout, isAborted } = normalizeError(err);
 ```
+
+Understands Node's `TypeError: fetch failed` (real code read from `err.cause`), browser `Failed to fetch`, undici timeouts, and axios. `isTimeout` is only for real timeouts; a deliberate `AbortController.abort()` sets `isAborted` instead.
 
 Every field is always present (`null`/`false` when not applicable) — no existence checks needed.
 
@@ -116,6 +120,8 @@ buildQuery({ q: "hello world", tag: ["a", "b"] });
 // "q=hello%20world&tag=a&tag=b"
 ```
 
+`Date` values are serialized as ISO 8601. Nested objects throw a `TypeError` (flatten or `JSON.stringify` them first) instead of silently becoming `[object Object]`.
+
 For full parsing/nested-object support, use [`query-string`](https://www.npmjs.com/package/query-string) instead — this only covers the common flat-object case with zero dependencies.
 
 ### `retryAfterAware(fn, opts?)`
@@ -136,6 +142,11 @@ const response = await retryAfterAware(
 | `fallbackDelayMs` | `1000` | used when no usable header is present |
 | `maxDelayMs` | `60000` | |
 | `onRetry` | — | `(status, waitMs, attempt) => void` |
+| `shouldRetryError` | network errors + timeouts | `(err, attempt) => boolean` — decides whether a *thrown* error is retried |
+| `onRetryError` | — | `(err, waitMs, attempt) => void` |
+| `signal` | — | `AbortSignal` — cancels the loop (even mid-wait), throwing `RetryAbortedError` |
+
+The body of every response that gets retried is cancelled so the connection is freed.
 
 ### `withProgress(response, onProgress?)`
 
@@ -147,7 +158,14 @@ const bytes = await withProgress(response, ({ loaded, total, percent }) => {
 });
 ```
 
-Works without `Content-Length` too — `total`/`percent` are just `null` in that case, `loaded` is still accurate. Falls back to a single-shot read (still calling `onProgress` once) if the response body is not a stream.
+Works without `Content-Length` too — `total`/`percent` are just `null` in that case, `loaded` is still accurate. They're also `null` when a `Content-Encoding` is applied (the header is the compressed size, but you receive decompressed bytes), and `percent` never exceeds 100. Falls back to a single-shot read (still calling `onProgress` once) if the response body is not a stream.
+
+```js
+const bytes = await withProgress(response, onProgress, {
+  maxBytes: 50 * 1024 * 1024, // throws BodyTooLargeError (code "EBODYTOOLARGE") past this
+  signal: controller.signal,  // abort the read
+});
+```
 
 ### `withDedupe(fn, opts?)`
 
@@ -163,6 +181,8 @@ const [a, b] = await Promise.all([getUser(1), getUser(1)]);
 | Option | Default | Notes |
 | --- | --- | --- |
 | `keyFn` | `(...args) => JSON.stringify(args)` | derives the dedupe key from call args |
+
+Plain arguments are compared by value (object key order doesn't matter); anything else — `AbortSignal`s, `Response`s, class instances, functions — is compared by identity, so calls with different `AbortSignal`s are never merged. Note that merged callers share one promise, so aborting the request affects everyone waiting on it.
 
 This is deduplication of *concurrent* calls, not a cache — once a call settles (success or failure), the next call with the same key starts fresh.
 
