@@ -3,6 +3,7 @@ import reqkit from "./index.js";
 export const {
   withRetry,
   RetryAbortedError,
+  StopRetry,
   withTimeout,
   TimeoutError,
   normalizeError,
@@ -14,6 +15,9 @@ export const {
   withProgress,
   BodyTooLargeError,
   withDedupe,
+  createLimiter,
+  createFetch,
+  HTTPError,
 } = reqkit;
 
 export default reqkit;
