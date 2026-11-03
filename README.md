@@ -54,7 +54,7 @@ const pages = await limit.map(urls, (url) =>
 
 Try everything in your browser — retries obeying `Retry-After`, rate limiting, the circuit breaker, caching, SSE streaming and a resumable download that survives a dropped connection. It runs against a fake in-memory server, so there's nothing to install and no network involved.
 
-Run it locally: `npm run build && python3 -m http.server -d docs` → open `http://localhost:8000`. (ES modules don't load from `file://`, so it needs a server.) The repo's `pages.yml` workflow publishes the same folder to GitHub Pages — enable it once under Settings → Pages → Source: "GitHub Actions".
+Run it locally: `npm run build && python3 -m http.server -d docs` → open `http://localhost:8000`. (ES modules don't load from `file://`, so it needs a server.)
 
 ## Works with what you already use
 
