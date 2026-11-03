@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>reqkit playground</title>
+  <meta name="description" content="Try reqkit in your browser: retries that obey Retry-After, rate limiting, circuit breaker, caching, SSE streaming and resumable downloads — against a fake server, no network." />
+  <style>
+    :root {
+      --bg: #ffffff; --fg: #1a1d21; --muted: #5b6470; --card: #f6f8fa; --border: #d8dee4;
+      --accent: #2f6feb; --accent-fg: #ffffff; --log-bg: #0f1419; --log-fg: #d7e2ee; --ok: #3fb950;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117; --fg: #e6edf3; --muted: #8b949e; --card: #161b22; --border: #30363d;
+        --accent: #4c8dff; --accent-fg: #0b1220; --log-bg: #010409; --log-fg: #c9d6e2;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      padding: env(safe-area-inset-top, 0) 0 env(safe-area-inset-bottom, 0);
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; }
+    h1 { margin: 0 0 4px; font-size: 1.8rem; }
+    .tagline { color: var(--muted); margin: 0 0 16px; }
+    .links a { color: var(--accent); margin-right: 14px; text-decoration: none; }
+    .links a:hover { text-decoration: underline; }
+    .note { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; margin: 18px 0 8px; color: var(--muted); font-size: .92rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin: 16px 0; }
+    .card h2 { margin: 0 0 4px; font-size: 1.1rem; }
+    .card p { margin: 0 0 12px; color: var(--muted); font-size: .95rem; }
+    pre { margin: 0; overflow-x: auto; border-radius: 8px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    pre.code { background: var(--bg); border: 1px solid var(--border); padding: 10px 12px; margin-bottom: 12px; }
+    pre.log { background: var(--log-bg); color: var(--log-fg); padding: 10px 12px; min-height: 3.2em; max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+    pre.log:empty::before { content: "Press Run to see what happens…"; opacity: .5; }
+    .ok-line { color: var(--ok); }
+    button {
+      appearance: none; border: 0; border-radius: 8px; padding: 9px 16px; margin-bottom: 12px;
+      background: var(--accent); color: var(--accent-fg); font: inherit; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { opacity: .55; cursor: progress; }
+    footer { color: var(--muted); font-size: .85rem; margin-top: 32px; }
+    noscript, .error { color: #d1242f; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>reqkit playground</h1>
+    <p class="tagline">Tiny, zero-dependency HTTP helpers — retries that respect <code>Retry-After</code>, timeouts that really cancel, errors that make sense.</p>
+    <p class="links">
+      <a href="https://github.com/boy-offi9-inc/reqkit">GitHub</a>
+      <a href="https://www.npmjs.com/package/@boy-offi9-inc/reqkit">npm</a>
+    </p>
+    <p class="note">Everything below runs <strong>in your browser</strong> against a fake in-memory server (<code>createMockFetch</code>) — no network, nothing to install. The timings you see are real.</p>
+
+    <div id="demos"></div>
+    <noscript><p>This page needs JavaScript.</p></noscript>
+
+    <footer>
+      Built from the same ESM bundle you can <code>import</code> in Deno, Bun, Workers and browsers: <code>@boy-offi9-inc/reqkit/browser</code>.
+    </footer>
+  </main>
+
+  <script type="module">
+    // Note: ES modules don't load from file:// — serve this folder, e.g.  python3 -m http.server -d docs
+    const root = document.getElementById("demos");
+    try {
+      const { demos } = await import("./demo.mjs");
+
+      for (const demo of demos) {
+        const card = document.createElement("section");
+        card.className = "card";
+
+        const h = document.createElement("h2");
+        h.textContent = demo.title;
+        const p = document.createElement("p");
+        p.textContent = demo.blurb;
+        const code = document.createElement("pre");
+        code.className = "code";
+        code.textContent = demo.code;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "▶ Run";
+        const log = document.createElement("pre");
+        log.className = "log";
+        log.setAttribute("aria-live", "polite");
+
+        const write = (line) => {
+          const row = document.createElement("div");
+          if (line.includes("✓")) row.className = "ok-line";
+          row.textContent = line;
+          log.appendChild(row);
+          log.scrollTop = log.scrollHeight;
+        };
+
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          log.textContent = "";
+          try {
+            await demo.run(write);
+          } catch (err) {
+            write(`✗ ${err && err.name}: ${err && err.message}`);
+          } finally {
+            button.disabled = false;
+          }
+        });
+
+        card.append(h, p, code, button, log);
+        root.appendChild(card);
+      }
+    } catch (err) {
+      const e = document.createElement("p");
+      e.className = "error";
+      e.textContent = `Couldn't load the demos (${err.message}). If you opened this file directly, serve the folder instead: python3 -m http.server -d docs`;
+      root.appendChild(e);
+    }
+  </script>
+</body>
+</html>

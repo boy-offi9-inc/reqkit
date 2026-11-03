@@ -2,3 +2,5 @@ node_modules/
 npm-debug.log
 .DS_Store
 *.tgz
+# built by `npm run build` (docs/reqkit.mjs is committed on purpose: GitHub Pages serves it)
+dist/

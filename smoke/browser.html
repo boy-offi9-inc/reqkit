@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>reqkit browser smoke test</title>
+<pre id="out">running…</pre>
+<script type="module">
+  // CI drives this page with Playwright and waits for window.__smoke.
+  import * as reqkit from "../dist/reqkit.mjs";
+  import { runChecks } from "./checks.mjs";
+
+  const lines = [];
+  const result = await runChecks(reqkit, (l) => lines.push(l));
+  document.getElementById("out").textContent = lines.join("\n") + `\n\n${result.passed} passed, ${result.failed} failed`;
+  window.__smoke = result;
+</script>

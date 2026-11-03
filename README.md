@@ -48,6 +48,30 @@ const pages = await limit.map(urls, (url) =>
   )
 );
 ```
+---
+
+## Playground
+
+Try everything in your browser — retries obeying `Retry-After`, rate limiting, the circuit breaker, caching, SSE streaming and a resumable download that survives a dropped connection. It runs against a fake in-memory server, so there's nothing to install and no network involved.
+
+Run it locally: `npm run build && python3 -m http.server -d docs` → open `http://localhost:8000`. (ES modules don't load from `file://`, so it needs a server.) The repo's `pages.yml` workflow publishes the same folder to GitHub Pages — enable it once under Settings → Pages → Source: "GitHub Actions".
+
+## Works with what you already use
+
+Recipes for **axios, ky, got, undici/node-fetch**, testing, and LLM streaming live in [RECIPES.md](./RECIPES.md): keep your client, bolt on just the piece you're missing (`Retry-After`-aware retries, a rate limiter, a circuit breaker).
+
+## Runtime support
+
+| Runtime | Status |
+|---|---|
+| **Node 18, 20, 22, 24** | Primary target. Full test suite runs in CI on all four. |
+| **Deno, Bun, browsers, Cloudflare Workers** | Use the dependency-free ESM bundle (`@boy-offi9-inc/reqkit/browser`, or `import … from "npm:@boy-offi9-inc/reqkit"` in Deno). Only web-standard APIs are used. CI smoke-tests the bundle on Deno, Bun and headless Chromium — **experimental** until those jobs have a track record; please open an issue if one misbehaves. |
+
+```html
+<script type="module">
+  import { createFetch } from "https://cdn.jsdelivr.net/npm/@boy-offi9-inc/reqkit@0.5.0/dist/reqkit.mjs";
+</script>
+```
 
 ---
 

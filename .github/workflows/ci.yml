@@ -11,16 +11,63 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [18, 20, 22]
+        node: [18, 20, 22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
       - run: npm install --no-audit --no-fund
+      - run: npm run build
       - run: npm test
+      - run: npm run smoke
       - run: npm run typecheck
         if: matrix.node == 22
       - name: Check the published tarball contents
         if: matrix.node == 22
         run: npm pack --dry-run
+
+  # ---------------------------------------------------------------------------
+  # Other runtimes. These run the same smoke checks (smoke/checks.mjs) against
+  # the ESM bundle. They're new, so they're allowed to fail without turning the
+  # whole run red — once they've been green for a while, delete the
+  # `continue-on-error` lines to make them required.
+  # ---------------------------------------------------------------------------
+  smoke-deno:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/build-esm.js
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno run smoke/run.mjs
+
+  smoke-bun:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/build-esm.js
+      - uses: oven-sh/setup-bun@v2
+      - run: bun smoke/run.mjs
+
+  smoke-browser:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/build-esm.js
+      - run: npm install --no-save --no-audit --no-fund playwright
+      - run: npx playwright install --with-deps chromium
+      - run: node smoke/browser-smoke.mjs

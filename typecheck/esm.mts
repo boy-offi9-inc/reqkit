@@ -123,3 +123,7 @@ export async function check040(res: Response, signal: AbortSignal) {
 
   return [viaRun, blocked, state, other, mocked, calls, bytes];
 }
+
+// the dependency-free bundle has the same types
+import { createFetch as createFetchBrowser, withRetry as withRetryBrowser } from "@boy-offi9-inc/reqkit/browser";
+export const viaBundle = [createFetchBrowser({ baseUrl: "https://x.test" }), withRetryBrowser];
