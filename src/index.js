@@ -8,6 +8,12 @@ const { withProgress, BodyTooLargeError } = require("./withProgress");
 const { withDedupe } = require("./withDedupe");
 const { createLimiter } = require("./createLimiter");
 const { createFetch, HTTPError } = require("./createFetch");
+const { createRateLimiter } = require("./createRateLimiter");
+const { createCircuitBreaker, CircuitOpenError } = require("./createCircuitBreaker");
+const { createMemoryCache } = require("./createMemoryCache");
+const { createMockFetch } = require("./createMockFetch");
+const { downloadResumable } = require("./downloadResumable");
+const { readLines, readNDJSON, readSSE } = require("./streams");
 
 module.exports = {
   withRetry,
@@ -27,4 +33,13 @@ module.exports = {
   createLimiter,
   createFetch,
   HTTPError,
+  createRateLimiter,
+  createCircuitBreaker,
+  CircuitOpenError,
+  createMemoryCache,
+  createMockFetch,
+  downloadResumable,
+  readLines,
+  readNDJSON,
+  readSSE,
 };

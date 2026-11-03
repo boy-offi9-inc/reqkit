@@ -29,4 +29,23 @@ function sleep(ms, signal, cause) {
   });
 }
 
-module.exports = { RetryAbortedError, sleep };
+/** Like sleep(), but rejects with the signal's own reason (an AbortError by default). */
+function abortableSleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+module.exports = { RetryAbortedError, sleep, abortableSleep };

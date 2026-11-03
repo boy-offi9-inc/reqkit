@@ -71,3 +71,55 @@ export async function check(res: Response, signal: AbortSignal) {
 
   return [aborted, bytes, id, code, cause, doubled, one, active, user.id, created.ok, status, reqkit.withRetry];
 }
+
+// ---- 0.4.0 surface ----------------------------------------------------------
+import {
+  createRateLimiter,
+  createCircuitBreaker,
+  CircuitOpenError,
+  createMemoryCache,
+  createMockFetch,
+  downloadResumable,
+  readLines,
+  readNDJSON,
+  readSSE,
+} from "@boy-offi9-inc/reqkit";
+
+export async function check040(res: Response, signal: AbortSignal) {
+  const rl = createRateLimiter({ requests: 5, perMs: 1000 });
+  await rl.acquire({ signal });
+  rl.update(res);
+  const viaRun: Response = await rl.run(() => fetch("https://x.test"));
+  const blocked: number = rl.blockedForMs;
+
+  const cb = createCircuitBreaker({ failureThreshold: 3, onStateChange: (s, prev) => void [s, prev] });
+  const state: "closed" | "open" | "half-open" = cb.state;
+  try {
+    await cb.run(async () => 1);
+  } catch (e) {
+    if (e instanceof CircuitOpenError) void e.retryAfterMs;
+  }
+
+  const store = createMemoryCache({ maxEntries: 10 });
+  const api = createFetch({
+    baseUrl: "https://api.test",
+    rateLimit: rl,
+    circuitBreaker: (url) => createCircuitBreaker(),
+    cache: { ttl: 1000, staleWhileRevalidate: 5000, store, onEvent: (e) => void e.type },
+  });
+  await api("/x", { cache: "reload" });
+  const other = createFetch({ rateLimit: { requests: 2, perMs: 100 }, circuitBreaker: true, cache: true });
+
+  const mock = createMockFetch();
+  mock.get("/users").replyOnce(503, "busy", { headers: { "retry-after": "0" }, delayMs: 5 }).reply(200, { ok: true });
+  mock.post(/orders/).replyWith((call) => ({ status: 201, body: call.json })).failOnce(mock.networkError("ECONNRESET"));
+  const mocked = createFetch({ fetch: mock.fetch });
+  const calls: number = mock.calls.length;
+
+  const bytes: Uint8Array = await downloadResumable("https://x.test/f", { retries: 2, maxBytes: 10, signal });
+  for await (const line of readLines(res, { signal })) void line.length;
+  for await (const row of readNDJSON<{ id: number }>(res)) void row.id;
+  for await (const ev of readSSE(res)) void [ev.event, ev.data, ev.id, ev.retry];
+
+  return [viaRun, blocked, state, other, mocked, calls, bytes];
+}

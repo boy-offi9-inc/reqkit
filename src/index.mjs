@@ -18,6 +18,15 @@ export const {
   createLimiter,
   createFetch,
   HTTPError,
+  createRateLimiter,
+  createCircuitBreaker,
+  CircuitOpenError,
+  createMemoryCache,
+  createMockFetch,
+  downloadResumable,
+  readLines,
+  readNDJSON,
+  readSSE,
 } = reqkit;
 
 export default reqkit;

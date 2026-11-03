@@ -1,7 +1,7 @@
 {
   "name": "@boy-offi9-inc/reqkit",
-  "version": "0.3.0",
-  "description": "Small, composable HTTP helpers — retry with backoff and Retry-After, timeouts, normalized errors, safe JSON, download progress, dedupe, a concurrency limiter, and an opt-in createFetch. Not a client; works alongside fetch/axios/anything.",
+  "version": "0.4.0",
+  "description": "Small, composable HTTP helpers — retry with backoff and Retry-After, timeouts, normalized errors, rate limiter, circuit breaker, response cache, resumable downloads, SSE/NDJSON streams, mock fetch, and an opt-in createFetch. Not a client; works alongside fetch/axios/anything.",
   "main": "./src/index.js",
   "types": "./types/index.d.ts",
   "exports": {
@@ -38,7 +38,14 @@
     "dedupe",
     "http-client",
     "fetch-wrapper",
-    "abort-signal"
+    "abort-signal",
+    "circuit-breaker",
+    "cache",
+    "sse",
+    "ndjson",
+    "streaming",
+    "resumable-download",
+    "mock"
   ],
   "author": "Boy Offi9",
   "license": "MIT",
@@ -60,7 +67,6 @@
     "src",
     "types",
     "README.md",
-    "CHANGELOG.md",
     "LICENSE"
   ],
   "devDependencies": {

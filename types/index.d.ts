@@ -203,6 +203,15 @@ export interface CreateFetchDefaults {
   timeout?: number | false;
   /** false disables retrying. */
   retry?: false | CreateFetchRetryOptions;
+  /**
+   * `true` only learns from X-RateLimit-* / Retry-After headers; `{ requests, perMs }`
+   * also enforces a budget; or share a createRateLimiter() instance.
+   */
+  rateLimit?: boolean | RateLimiterOptions | RateLimiter;
+  /** Options for a per-origin breaker, a shared breaker instance, or `(url) => breaker`. */
+  circuitBreaker?: boolean | CircuitBreakerOptions | CircuitBreaker | ((url: string) => CircuitBreaker);
+  /** In-memory GET cache with TTL, stale-while-revalidate and ETag/Last-Modified revalidation. `true` = 60s TTL. */
+  cache?: boolean | CacheOptions;
   /** Merge identical concurrent GET/HEAD calls. Default false. */
   dedupe?: boolean;
   /** Throw HTTPError on non-2xx. Default true. */
@@ -212,7 +221,7 @@ export interface CreateFetchDefaults {
   onResponse?: (ctx: FetchHookContext & { response: Response }) => void | Promise<void>;
 }
 
-export interface ReqkitRequestInit extends Omit<RequestInit, "headers"> {
+export interface ReqkitRequestInit extends Omit<RequestInit, "headers" | "cache"> {
   headers?: HeadersInit;
   query?: Record<string, unknown>;
   /** Serialized as the body with a JSON content-type. */
@@ -220,6 +229,8 @@ export interface ReqkitRequestInit extends Omit<RequestInit, "headers"> {
   timeout?: number | false;
   retry?: false | CreateFetchRetryOptions;
   throwHttpErrors?: boolean;
+  /** `false`/"no-store" bypass the cache; "reload" skips the read but refreshes the entry. */
+  cache?: false | "no-store" | "reload";
 }
 
 export interface ReqkitFetch {
@@ -231,3 +242,166 @@ export interface ReqkitFetch {
 }
 
 export function createFetch(defaults?: CreateFetchDefaults): ReqkitFetch;
+
+export interface RateLimiterOptions {
+  /** Max requests per window. Default Infinity. */
+  requests?: number;
+  /** Window length in ms. Default 1000. */
+  perMs?: number;
+}
+
+export interface RateLimiter {
+  /** Resolves when it's your turn (FIFO). Rejects with the signal's reason if aborted while waiting. */
+  acquire(opts?: { signal?: AbortSignal }): Promise<void>;
+  /** Learn from a response's X-RateLimit-* / RateLimit-* / Retry-After headers. */
+  update(response: { status?: number; headers?: { get(name: string): string | null } } | null | undefined): void;
+  /** acquire → fn() → update(result). */
+  run<T>(fn: () => Promise<T>, opts?: { signal?: AbortSignal }): Promise<T>;
+  /** Ms until a server-imposed pause ends (0 if none). */
+  readonly blockedForMs: number;
+  reset(): void;
+}
+
+export function createRateLimiter(opts?: RateLimiterOptions): RateLimiter;
+
+export class CircuitOpenError extends Error {
+  name: "CircuitOpenError";
+  code: "CIRCUIT_OPEN";
+  /** Ms until the breaker will let a probe through. */
+  retryAfterMs: number;
+  constructor(retryAfterMs: number);
+}
+
+export interface CircuitBreakerOptions {
+  /** Consecutive failures before opening. Default 5. */
+  failureThreshold?: number;
+  /** How long to stay open before allowing a probe. Default 30000. */
+  resetTimeoutMs?: number;
+  /** Concurrent probes allowed while half-open. Default 1. */
+  halfOpenMax?: number;
+  /** Default: any thrown error except AbortError, or a result with status >= 500. */
+  isFailure?: (valueOrError: any, isError: boolean) => boolean;
+  onStateChange?: (state: CircuitState, previous: CircuitState) => void;
+}
+
+export type CircuitState = "closed" | "open" | "half-open";
+
+export interface CircuitBreaker {
+  run<T>(fn: () => Promise<T>): Promise<T>;
+  readonly state: CircuitState;
+  readonly failures: number;
+  reset(): void;
+}
+
+export function createCircuitBreaker(opts?: CircuitBreakerOptions): CircuitBreaker;
+
+export interface CacheStore {
+  get(key: string): any | Promise<any>;
+  set(key: string, value: any): void | Promise<void>;
+  delete(key: string): any;
+}
+
+export interface MemoryCache extends CacheStore {
+  clear(): void;
+  readonly size: number;
+}
+
+export function createMemoryCache(opts?: { maxEntries?: number }): MemoryCache;
+
+export interface CacheEvent {
+  type: "hit" | "stale" | "revalidated" | "miss" | "store";
+  url: string;
+}
+
+export interface CacheOptions {
+  /** How long an entry is served without asking the server, in ms. Default 60000. */
+  ttl?: number;
+  /** After the TTL, keep serving the stale copy for this long while refreshing in the background. Default 0. */
+  staleWhileRevalidate?: number;
+  /** For the built-in memory store. Default 100. */
+  maxEntries?: number;
+  /** Responses larger than this aren't cached. Default 1 MiB. */
+  maxBodyBytes?: number;
+  /** Bring your own store (Redis, IndexedDB, a Map...). */
+  store?: CacheStore;
+  onEvent?: (event: CacheEvent) => void;
+}
+
+export interface MockCall {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: BodyInit | null | undefined;
+  signal?: AbortSignal;
+  /** The body parsed as JSON, if it was a JSON string. */
+  readonly json: any;
+}
+
+export interface MockReplyOptions {
+  headers?: HeadersInit;
+  /** Wait this long before answering; respects the request's AbortSignal. */
+  delayMs?: number;
+}
+
+export interface MockRoute {
+  reply(status?: number, body?: unknown, opts?: MockReplyOptions): MockRoute;
+  replyOnce(status?: number, body?: unknown, opts?: MockReplyOptions): MockRoute;
+  replyWith(fn: (call: MockCall) => Response | { status?: number; body?: unknown; headers?: HeadersInit } | Promise<Response | { status?: number; body?: unknown; headers?: HeadersInit }>): MockRoute;
+  replyWithOnce(fn: (call: MockCall) => Response | { status?: number; body?: unknown; headers?: HeadersInit } | Promise<Response | { status?: number; body?: unknown; headers?: HeadersInit }>): MockRoute;
+  fail(err?: unknown): MockRoute;
+  failOnce(err?: unknown): MockRoute;
+}
+
+export type MockMatcher = string | RegExp | ((url: string) => boolean);
+
+export interface MockFetch {
+  fetch: typeof fetch;
+  on(method: string, matcher: MockMatcher): MockRoute;
+  get(matcher: MockMatcher): MockRoute;
+  post(matcher: MockMatcher): MockRoute;
+  put(matcher: MockMatcher): MockRoute;
+  patch(matcher: MockMatcher): MockRoute;
+  delete(matcher: MockMatcher): MockRoute;
+  /** A TypeError("fetch failed") whose `cause.code` is set, like Node's fetch throws. */
+  networkError(code?: string): TypeError;
+  readonly calls: MockCall[];
+  reset(): void;
+}
+
+export function createMockFetch(): MockFetch;
+
+export interface DownloadResumableOptions {
+  fetch?: typeof fetch;
+  headers?: HeadersInit;
+  /** Consecutive attempts without progress before giving up. Default 5. */
+  retries?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  onProgress?: (progress: DownloadProgress) => void;
+  /** Throws BodyTooLargeError past this many bytes. */
+  maxBytes?: number;
+  signal?: AbortSignal;
+  onRetry?: (err: unknown, attempt: number, delayMs: number, info: { resumeFrom: number }) => void;
+}
+
+export function downloadResumable(url: string, opts?: DownloadResumableOptions): Promise<Uint8Array>;
+
+export type StreamSource = Response | ReadableStream<Uint8Array> | AsyncIterable<Uint8Array | string>;
+
+export interface StreamOptions {
+  signal?: AbortSignal;
+}
+
+export interface SSEEvent {
+  event: string;
+  data: string;
+  id: string;
+  retry: number | undefined;
+}
+
+export function readLines(source: StreamSource, opts?: StreamOptions): AsyncGenerator<string, void, undefined>;
+export function readNDJSON<T = unknown>(
+  source: StreamSource,
+  opts?: StreamOptions & { skipInvalid?: boolean }
+): AsyncGenerator<T, void, undefined>;
+export function readSSE(source: StreamSource, opts?: StreamOptions): AsyncGenerator<SSEEvent, void, undefined>;

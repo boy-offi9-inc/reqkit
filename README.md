@@ -63,6 +63,12 @@ const pages = await limit.map(urls, (url) =>
 | Download progress and size caps for any stream | [`withProgress`](#withprogressresponse-onprogress-opts) |
 | Merge identical concurrent calls into one | [`withDedupe`](#withdedupefn-opts) |
 | Run N things at a time | [`createLimiter`](#createlimiterconcurrency) |
+| Slow down *before* the server says 429 (obey `X-RateLimit-*`) | [`createRateLimiter`](#createratelimiteropts) |
+| Stop hammering a service that keeps failing | [`createCircuitBreaker`](#createcircuitbreakeropts) |
+| Cache GETs (TTL, stale-while-revalidate, ETag/304) | [`createFetch` → `cache`](#caching) |
+| Resume a download after the connection drops | [`downloadResumable`](#downloadresumableurl-opts) |
+| Read SSE / NDJSON / lines from a streamed body (LLM tokens!) | [`readSSE` / `readNDJSON` / `readLines`](#streaming-readsse-readndjson-readlines) |
+| Test retry/timeout code without a network | [`createMockFetch`](#createmockfetch) |
 | All of the above, wired up | [`createFetch`](#createfetchdefaults) |
 
 ---
@@ -280,6 +286,93 @@ limit.pendingCount; // waiting
 
 A task that throws or rejects only fails its own promise — the queue keeps going. `concurrency` must be an integer ≥ 1 (or `Infinity`).
 
+### `createRateLimiter(opts?)`
+
+A *proactive* limiter: it slows you down before the server has to say 429. It's fed by your own budget (`requests` per `perMs`, sliding window) **and** by what the server tells you — `X-RateLimit-Remaining` / `-Reset`, `RateLimit-*`, and `Retry-After` on 429/503. Once the server says `remaining: 0`, everything pauses until the reset. Callers are served FIFO.
+
+```js
+const rl = createRateLimiter({ requests: 10, perMs: 1000 });
+
+const res = await rl.run(() => fetch(url)); // acquire → call → learn from the response headers
+// or by hand:
+await rl.acquire({ signal });  // rejects with the signal's reason if aborted while waiting
+rl.update(response);
+rl.blockedForMs;               // time left on a server-imposed pause
+```
+
+Reset headers are understood in both flavors: delta seconds (`30`) and absolute epoch (seconds or ms). In `createFetch`, waiting for the budget never counts against the per-attempt timeout.
+
+### `createCircuitBreaker(opts?)`
+
+After `failureThreshold` consecutive failures the circuit **opens** and calls fail instantly with `CircuitOpenError` for `resetTimeoutMs` — so a dying service isn't hammered and your callers don't sit waiting on it. Then it goes **half-open**, lets a probe through, and closes again on success.
+
+```js
+const breaker = createCircuitBreaker({ failureThreshold: 5, resetTimeoutMs: 30_000 });
+
+try {
+  const res = await breaker.run(() => fetch(url));
+} catch (err) {
+  if (err instanceof CircuitOpenError) console.log(`try again in ${err.retryAfterMs}ms`);
+}
+breaker.state; // "closed" | "open" | "half-open"
+```
+
+By default a thrown error (except `AbortError`) or a result with `status >= 500` counts as a failure; override with `isFailure(valueOrError, isError)`. `CircuitOpenError` has `code: "CIRCUIT_OPEN"` and is never classified as a network error, so retries stop the moment the circuit opens.
+
+### Streaming: `readSSE`, `readNDJSON`, `readLines`
+
+Async iterators over a streamed body — a `Response`, a web `ReadableStream`, or any async iterable (Node streams). Early `break` and `signal` abort both cancel the stream so the connection is released.
+
+```js
+// LLM-style token stream (Server-Sent Events)
+for await (const { event, data, id } of readSSE(response, { signal })) {
+  if (data === "[DONE]") break;
+  process.stdout.write(JSON.parse(data).token);
+}
+
+for await (const row of readNDJSON(response)) console.log(row); // newline-delimited JSON
+for await (const line of readLines(response)) console.log(line);
+```
+
+`readSSE` follows the spec: multi-line `data:` is joined with `\n`, comments are ignored, `event` defaults to `"message"`, `id` carries over, `retry` is parsed, and an event cut off by the end of the stream is dropped. `readNDJSON` skips blank lines and names the bad line on a parse error (or pass `skipInvalid: true`). Line splitting handles `\n`, `\r\n`, `\r`, a BOM, and multi-byte characters split across chunks.
+
+### `downloadResumable(url, opts?)`
+
+Downloads into memory and, if the connection drops mid-body, **resumes with an HTTP `Range` request** instead of starting over. It sends `If-Range` with the first response's strong ETag (or `Last-Modified`), so a file that changed on the server is restarted rather than stitched together wrongly; if the server ignores `Range`, it restarts from zero.
+
+```js
+const bytes = await downloadResumable(url, {
+  onProgress: ({ loaded, total, percent }) => console.log(percent),
+  maxBytes: 200 * 1024 * 1024, // BodyTooLargeError past this
+  retries: 5,                  // consecutive attempts *without progress*
+  signal,
+  onRetry: (err, attempt, delayMs, { resumeFrom }) => console.log(`resuming from byte ${resumeFrom}`),
+});
+```
+
+It honors `Retry-After` on 429/503, never retries a 4xx (other than 408/425/429) or a size-limit error, and asks for `Accept-Encoding: identity` so byte offsets line up. Pass `fetch: myCreateFetchInstance` to route it through your own client.
+
+### `createMockFetch()`
+
+A scriptable, fetch-compatible test double — for testing code with retries, timeouts, and rate limits without a network.
+
+```js
+const mock = createMockFetch();
+
+mock.on("GET", "/users/1")
+  .replyOnce(503, "busy", { headers: { "retry-after": "0" } })  // consumed in order…
+  .reply(200, { id: 1 });                                        // …then this, forever
+mock.post(/orders/).failOnce(mock.networkError("ECONNRESET"));   // reject like a real network failure
+mock.get("/slow").reply(200, "late", { delayMs: 500 });          // respects AbortSignal → test timeouts
+
+const api = createFetch({ fetch: mock.fetch, baseUrl: "https://api.test" });
+await api.json("/users/1"); // { id: 1 } — after one retry
+mock.calls;                 // [{ url, method, headers, body, json, signal }, ...]
+mock.reset();
+```
+
+String matchers match the full URL, `pathname + search`, or the bare `pathname`; RegExp and `(url) => boolean` work too, and `"*"` matches any method. `replyWith(call => …)` returns a `Response` or `{ status, body, headers }`. Unmatched requests reject with a clear error (and are still recorded in `mock.calls`).
+
 ### `createFetch(defaults)`
 
 Opt-in assembly of the pieces above into a fetch-like function. It's still plain `fetch` underneath: you get a standard `Response`, and you can pass your own `fetch`.
@@ -316,11 +409,39 @@ const admin = api.extend({ headers: { "x-role": "admin" } }); // merges over the
 | `timeout` | `30000` | per attempt, in ms; `false` disables |
 | `signal` *(per request)* | — | external abort; surfaces as a plain `AbortError`, never retried |
 | `retry` | see below | `false` disables; otherwise `{ retries, statusCodes, methods, baseDelayMs, maxDelayMs, factor, jitter, maxRetryTime, shouldRetry, calculateDelay, onRetry }` |
+| `rateLimit` | — | `true` just learns from `X-RateLimit-*` / `Retry-After`; `{ requests, perMs }` also enforces a budget; or pass a shared [`createRateLimiter`](#createratelimiteropts) |
+| `circuitBreaker` | — | `true` / options → one breaker **per origin**; or pass a shared [`createCircuitBreaker`](#createcircuitbreakeropts), or `(url) => breaker`. An open circuit stops retries immediately. |
+| `cache` | — | in-memory GET cache — see [Caching](#caching). `true` = 60s TTL. Per request: `cache: false` bypasses, `"reload"` refreshes |
 | `dedupe` | `false` | merge identical concurrent `GET`/`HEAD` calls; every caller gets its own readable clone. Requests with their own `signal` are never merged. |
 | `throwHttpErrors` | `true` | throw `HTTPError` for non-2xx (`err.status`, `err.response`, `err.url`, `err.method`) |
 | `fetch` | `globalThis.fetch` | swap in undici, node-fetch, a test double... |
 | `onRequest(ctx)` | — | once per call; may mutate `ctx.url` / `ctx.init` (e.g. add a header) |
 | `onResponse(ctx)` | — | once per call, with the final response, before `HTTPError` is thrown |
+
+#### Caching
+
+```js
+const api = createFetch({
+  baseUrl: "https://api.example.com",
+  cache: { ttl: 30_000, staleWhileRevalidate: 5 * 60_000 },
+});
+
+await api.json("/config"); // network
+await api.json("/config"); // fresh → served from memory, no request
+// after 30s: stale → returned instantly, refreshed in the background
+// after 5m30s: revalidated with If-None-Match / If-Modified-Since — a 304 reuses the cached body
+```
+
+| `cache` option | Default | Description |
+|---|---|---|
+| `ttl` | `60000` | serve without asking the server for this long |
+| `staleWhileRevalidate` | `0` | after the TTL, keep serving the stale copy this long while refreshing in the background |
+| `maxEntries` | `100` | size of the built-in LRU store |
+| `maxBodyBytes` | `1 MiB` | bigger responses aren't cached |
+| `store` | built-in LRU | bring your own (`get`/`set`/`delete`, sync or async) — Redis, IndexedDB, a `Map`… |
+| `onEvent` | — | `({ type: "hit" \| "stale" \| "revalidated" \| "miss" \| "store", url })` for logging/metrics |
+
+Only `GET` `200` responses are cached; `Cache-Control: no-store` and `Vary: *` are respected. **Every request header is part of the cache key**, so a response fetched with one user's `Authorization` can never be served to another. Each hit is a fresh `Response`, so bodies can be read as many times as you like. `extend()` children share the parent's cache, limiter and breakers.
 
 **Retry defaults:** 2 retries on network errors, timeouts, and status `408, 425, 429, 500, 502, 503, 504`, honoring `Retry-After`. Only **idempotent methods** (`GET, HEAD, OPTIONS, PUT, DELETE`) are retried — `POST`/`PATCH` aren't, so a timeout can't double-charge anyone. Opt a request in by sending an `Idempotency-Key` header, or by listing the method in `retry.methods`. Stream bodies are never retried (they can't be replayed).
 
@@ -337,4 +458,4 @@ const admin = api.extend({ headers: { "x-role": "admin" } }); // merges over the
 
 ## Prior art
 
-reqkit's building blocks are small, from-scratch implementations of ideas that proved themselves in popular libraries — go look at them, they're great: [`p-retry`](https://github.com/sindresorhus/p-retry) (`StopRetry`, time budgets), [`ky`](https://github.com/sindresorhus/ky) and [`ofetch`](https://github.com/unjs/ofetch) (`HTTPError`, `json`/`query`/`baseUrl`, `extend`, retry statuses), [`got`](https://github.com/sindresorhus/got) and [`axios-retry`](https://github.com/softonic/axios-retry) (retry only idempotent methods, `calculateDelay`), [`p-limit`](https://github.com/sindresorhus/p-limit) (concurrency limiter), and the AWS Architecture Blog's "full jitter" backoff.
+reqkit's building blocks are small, from-scratch implementations of ideas that proved themselves in popular libraries — go look at them, they're great: [`p-retry`](https://github.com/sindresorhus/p-retry) (`StopRetry`, time budgets), [`ky`](https://github.com/sindresorhus/ky) and [`ofetch`](https://github.com/unjs/ofetch) (`HTTPError`, `json`/`query`/`baseUrl`, `extend`, retry statuses), [`got`](https://github.com/sindresorhus/got) and [`axios-retry`](https://github.com/softonic/axios-retry) (retry only idempotent methods, `calculateDelay`), [`p-limit`](https://github.com/sindresorhus/p-limit) (concurrency limiter), [`opossum`](https://github.com/nodeshift/opossum) (circuit breaker), [`bottleneck`](https://github.com/SGrondin/bottleneck) / [`p-throttle`](https://github.com/sindresorhus/p-throttle) (rate limiting), [`eventsource-parser`](https://github.com/rexxars/eventsource-parser) (SSE), [`nock`](https://github.com/nock/nock) / undici's `MockAgent` (mocking), the HTTP caching RFCs (`stale-while-revalidate`, conditional requests), and the AWS Architecture Blog's "full jitter" backoff.

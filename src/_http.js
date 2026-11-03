@@ -20,9 +20,30 @@ function parseRetryAfter(headerValue) {
   return null;
 }
 
+// Reset headers come in two flavors: a delta in seconds ("30", the IETF
+// RateLimit-Reset draft, Discord's *-Reset-After) or an absolute epoch
+// (GitHub/Twitter style, seconds or ms). Anything under ~31 years in seconds
+// can't be a real epoch, so treat it as a delta.
+function parseResetMs(value) {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  const n = Number(value);
+  if (Number.isNaN(n) || n < 0) return null;
+  if (n < 1e9) return n * 1000;
+  const epochMs = n > 4102444800 ? n : n * 1000;
+  return Math.max(0, epochMs - Date.now());
+}
+
+function readHeader(headers, ...names) {
+  for (const name of names) {
+    const v = headers.get(name);
+    if (v !== null && v !== undefined && v !== "") return v;
+  }
+  return null;
+}
+
 /**
  * Reads a wait time from common rate-limit headers, trying Retry-After first,
- * then falling back to X-RateLimit-Reset (epoch seconds or ms) if present.
+ * then falling back to X-RateLimit-Reset(-After) if present.
  */
 function getWaitMsFromHeaders(headers) {
   if (!headers || typeof headers.get !== "function") return null;
@@ -30,18 +51,28 @@ function getWaitMsFromHeaders(headers) {
   const retryAfter = parseRetryAfter(headers.get("retry-after"));
   if (retryAfter !== null) return retryAfter;
 
-  const resetHeader = headers.get("x-ratelimit-reset") || headers.get("x-rate-limit-reset");
-  if (resetHeader) {
-    const resetValue = Number(resetHeader);
-    if (!Number.isNaN(resetValue)) {
-      // Could be epoch seconds or epoch ms — treat values below a
-      // year-2100-in-seconds threshold as seconds.
-      const resetMs = resetValue > 4102444800 ? resetValue : resetValue * 1000;
-      return Math.max(0, resetMs - Date.now());
-    }
-  }
+  return parseResetMs(
+    readHeader(headers, "x-ratelimit-reset-after", "x-ratelimit-reset", "x-rate-limit-reset", "ratelimit-reset")
+  );
+}
 
-  return null;
+/**
+ * Everything useful a response says about rate limits:
+ *   { remaining: number|null, resetMs: number|null, retryAfterMs: number|null }
+ * Understands X-RateLimit-*, X-Rate-Limit-*, RateLimit-* and Retry-After.
+ */
+function getRateLimitInfo(headers) {
+  const info = { remaining: null, resetMs: null, retryAfterMs: null };
+  if (!headers || typeof headers.get !== "function") return info;
+
+  const remaining = readHeader(headers, "x-ratelimit-remaining", "x-rate-limit-remaining", "ratelimit-remaining");
+  if (remaining !== null && !Number.isNaN(Number(remaining))) info.remaining = Number(remaining);
+
+  info.resetMs = parseResetMs(
+    readHeader(headers, "x-ratelimit-reset-after", "x-ratelimit-reset", "x-rate-limit-reset", "ratelimit-reset")
+  );
+  info.retryAfterMs = parseRetryAfter(headers.get("retry-after"));
+  return info;
 }
 
 async function discardBody(response) {
@@ -56,4 +87,4 @@ async function discardBody(response) {
   }
 }
 
-module.exports = { parseRetryAfter, getWaitMsFromHeaders, discardBody };
+module.exports = { parseRetryAfter, parseResetMs, getWaitMsFromHeaders, getRateLimitInfo, discardBody };

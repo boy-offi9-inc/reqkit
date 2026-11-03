@@ -4,23 +4,16 @@ const { withDedupe } = require("./withDedupe");
 const { buildQuery } = require("./buildQuery");
 const { parseJsonSafe } = require("./parseJsonSafe");
 const { normalizeError } = require("./normalizeError");
+const { HTTPError } = require("./HTTPError");
+const { createRateLimiter } = require("./createRateLimiter");
+const { createCircuitBreaker } = require("./createCircuitBreaker");
+const { createMemoryCache } = require("./createMemoryCache");
+const { cacheKey, snapshotResponse, entryToResponse } = require("./_cache");
+const { discardBody } = require("./_http");
 
 const DEFAULT_RETRY_STATUS_CODES = [408, 425, 429, 500, 502, 503, 504];
 // Safe to repeat without side effects. POST/PATCH are deliberately absent.
 const DEFAULT_RETRY_METHODS = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"];
-
-class HTTPError extends Error {
-  constructor(response, request) {
-    const statusText = response.statusText ? ` ${response.statusText}` : "";
-    super(`Request failed with status ${response.status}${statusText}: ${request.method} ${request.url}`);
-    this.name = "HTTPError";
-    this.status = response.status;
-    this.statusText = response.statusText || "";
-    this.response = response;
-    this.url = request.url;
-    this.method = request.method;
-  }
-}
 
 function isAbsoluteUrl(url) {
   return /^[a-z][a-z0-9+.-]*:/i.test(url);
@@ -53,14 +46,21 @@ function isStreamBody(body) {
   return Boolean(body) && typeof body === "object" && typeof body.getReader === "function";
 }
 
+function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url;
+  }
+}
+
 function mergeDefaults(base, extra) {
-  const headersOf = (d) => d.headers;
   const merged = { ...base, ...extra };
 
   if (base.headers || extra.headers) {
     merged.headers = async () => {
-      const a = await resolveHeaders(headersOf(base));
-      const b = await resolveHeaders(headersOf(extra));
+      const a = await resolveHeaders(base.headers);
+      const b = await resolveHeaders(extra.headers);
       return mergeHeaders(a, b);
     };
   }
@@ -81,6 +81,11 @@ function mergeDefaults(base, extra) {
  *  - per-attempt `timeout` (withTimeout) and external `signal`
  *  - retries (withRetry) on network errors/timeouts and retryable statuses,
  *    honoring Retry-After; only for idempotent methods unless you opt in
+ *  - `rateLimit`: stay under a budget and obey X-RateLimit-* / Retry-After
+ *    *before* the server has to say 429
+ *  - `circuitBreaker`: fail fast against a service that keeps failing
+ *  - `cache`: in-memory GET cache with TTL, stale-while-revalidate and
+ *    ETag / Last-Modified revalidation (304s)
  *  - concurrent GET de-duplication (withDedupe)
  *  - `HTTPError` on non-2xx (turn off with `throwHttpErrors: false`)
  *  - `onRequest` / `onResponse` hooks
@@ -92,6 +97,13 @@ function mergeDefaults(base, extra) {
  * @param {false | object} [defaults.retry] - false disables. Options:
  *   `retries`(2), `statusCodes`, `methods`, `baseDelayMs`, `maxDelayMs`,
  *   `factor`, `jitter`, `maxRetryTime`, `onRetry`, `calculateDelay`
+ * @param {boolean | object} [defaults.rateLimit] - `true` just learns from
+ *   response headers; `{ requests, perMs }` also enforces a budget; or pass a
+ *   createRateLimiter() instance to share one budget
+ * @param {boolean | object | Function} [defaults.circuitBreaker] - options for
+ *   a per-origin breaker, a createCircuitBreaker() instance, or `(url) => breaker`
+ * @param {boolean | object} [defaults.cache] - `{ ttl, staleWhileRevalidate,
+ *   maxEntries, maxBodyBytes, store, onEvent }`; `true` = 60s TTL
  * @param {boolean} [defaults.dedupe=false] - merge identical concurrent GET/HEAD calls
  * @param {boolean} [defaults.throwHttpErrors=true]
  * @param {typeof fetch} [defaults.fetch=globalThis.fetch]
@@ -105,6 +117,9 @@ function createFetch(defaults = {}) {
     headers: defaultHeaders,
     timeout: defaultTimeout = 30000,
     retry: defaultRetry = {},
+    rateLimit,
+    circuitBreaker,
+    cache,
     dedupe = false,
     throwHttpErrors: defaultThrow = true,
     fetch: customFetch,
@@ -114,9 +129,66 @@ function createFetch(defaults = {}) {
 
   const doFetch = (...args) => (customFetch || globalThis.fetch)(...args);
 
+  // --- stateful pieces, built once so `extend()` children share them -------
+  const limiter = !rateLimit
+    ? null
+    : typeof rateLimit.acquire === "function"
+      ? rateLimit
+      : createRateLimiter(rateLimit === true ? {} : rateLimit);
+
+  const breakerRegistry = new Map();
+  const breakerFor = !circuitBreaker
+    ? null
+    : typeof circuitBreaker === "function"
+      ? circuitBreaker
+      : typeof circuitBreaker.run === "function"
+        ? () => circuitBreaker
+        : (url) => {
+            const origin = originOf(url);
+            if (!breakerRegistry.has(origin)) {
+              breakerRegistry.set(origin, createCircuitBreaker(circuitBreaker === true ? {} : circuitBreaker));
+            }
+            return breakerRegistry.get(origin);
+          };
+
+  const cacheCfg = !cache
+    ? null
+    : {
+        ttl: 60000,
+        staleWhileRevalidate: 0,
+        maxEntries: 100,
+        maxBodyBytes: undefined,
+        ...(cache === true ? {} : cache),
+      };
+  if (cacheCfg && !cacheCfg.store) cacheCfg.store = createMemoryCache({ maxEntries: cacheCfg.maxEntries });
+  // In-flight bookkeeping lives on the (shared) cache config so `extend()`
+  // children see the parent's pending writes and revalidations.
+  if (cacheCfg) {
+    cacheCfg.pending = cacheCfg.pending || new Map();
+    cacheCfg.revalidating = cacheCfg.revalidating || new Set();
+  }
+  const pendingStores = cacheCfg ? cacheCfg.pending : null;
+  const revalidating = cacheCfg ? cacheCfg.revalidating : null;
+  const emit = (type, url) => cacheCfg && cacheCfg.onEvent && cacheCfg.onEvent({ type, url });
+
   // Shared in-flight GETs. Every caller gets its own clone of the response so
   // body reads don't fight each other.
   const sharedFetch = withDedupe((key, url, init) => doFetch(url, init), { keyFn: (key) => key });
+
+  function scheduleStore(key, response, url) {
+    const p = snapshotResponse(response, cacheCfg.maxBodyBytes)
+      .then(async (entry) => {
+        if (entry) {
+          await cacheCfg.store.set(key, entry);
+          emit("store", url);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (pendingStores.get(key) === p) pendingStores.delete(key);
+      });
+    pendingStores.set(key, p);
+  }
 
   async function request(input, init = {}) {
     const {
@@ -127,6 +199,7 @@ function createFetch(defaults = {}) {
       throwHttpErrors = defaultThrow,
       signal,
       headers: initHeaders,
+      cache: cacheMode,
       ...fetchInit
     } = init;
 
@@ -152,30 +225,43 @@ function createFetch(defaults = {}) {
       retryCfg !== false &&
       !isStreamBody(ctx.init.body) && // a consumed stream can't be replayed
       (methods.map((m) => m.toUpperCase()).includes(finalMethod) || hasIdempotencyKey);
-
-    const attemptOnce = () =>
-      withTimeout(
-        (attemptSignal) => {
-          const attemptInit = { ...ctx.init, method: finalMethod, headers: finalHeaders, signal: attemptSignal };
-          const useDedupe = dedupe && !signal && !ctx.init.body && (finalMethod === "GET" || finalMethod === "HEAD");
-          if (!useDedupe) return doFetch(ctx.url, attemptInit);
-          // No per-attempt signal on a shared request: aborting one caller
-          // must never cancel everyone else's.
-          // It still gets its own timeout so a hung server can't leak the request.
-          const sharedInit = { ...attemptInit, signal: timeout === false ? undefined : AbortSignal.timeout(timeout) };
-          const key = `${finalMethod} ${ctx.url} ${JSON.stringify([...finalHeaders.entries()].sort())}`;
-          return sharedFetch(key, ctx.url, sharedInit).then((res) => res.clone());
-        },
-        timeout === false ? Infinity : timeout,
-        { signal }
-      );
-
     const { statusCodes, methods: _methods, retries = 2, shouldRetry: customShouldRetry, ...retryRest } = retryCfg || {};
 
-    let response;
-    try {
-      response = canRetry
-        ? await withRetry(attemptOnce, {
+    // One trip to the network: rate limit → circuit breaker → per-attempt
+    // timeout → fetch, retried per the policy above. `netHeaders` and
+    // `netSignal` are parameters so background revalidation can reuse this.
+    function network(netHeaders, netSignal) {
+      const attemptOnce = () => {
+        const attempt = async () => {
+          if (limiter) await limiter.acquire({ signal: netSignal });
+          const res = await withTimeout(
+            (attemptSignal) => {
+              const attemptInit = { ...ctx.init, method: finalMethod, headers: netHeaders, signal: attemptSignal };
+              const useDedupe =
+                dedupe && !netSignal && !ctx.init.body && (finalMethod === "GET" || finalMethod === "HEAD");
+              if (!useDedupe) return doFetch(ctx.url, attemptInit);
+              // No per-attempt signal on a shared request: aborting one caller
+              // must never cancel everyone else's. It still gets its own
+              // timeout so a hung server can't leak the request.
+              const sharedInit = {
+                ...attemptInit,
+                signal: timeout === false ? undefined : AbortSignal.timeout(timeout),
+              };
+              const key = `${finalMethod} ${ctx.url} ${JSON.stringify([...netHeaders.entries()].sort())}`;
+              return sharedFetch(key, ctx.url, sharedInit).then((res) => res.clone());
+            },
+            timeout === false ? Infinity : timeout,
+            { signal: netSignal }
+          );
+          if (limiter) limiter.update(res);
+          return res;
+        };
+        const breaker = breakerFor && breakerFor(ctx.url);
+        return breaker ? breaker.run(attempt) : attempt();
+      };
+
+      return canRetry
+        ? withRetry(attemptOnce, {
             ...retryRest,
             retries,
             retryStatusCodes: statusCodes || DEFAULT_RETRY_STATUS_CODES,
@@ -185,20 +271,102 @@ function createFetch(defaults = {}) {
                 const n = normalizeError(err);
                 return n.isNetworkError || n.isTimeout;
               }),
-            signal,
+            signal: netSignal,
           })
-        : await attemptOnce();
+        : attemptOnce();
+    }
+
+    function conditionalHeaders(entry) {
+      const h = new Headers(finalHeaders);
+      if (entry) {
+        if (entry.etag && !h.has("if-none-match")) h.set("if-none-match", entry.etag);
+        if (entry.lastModified && !h.has("if-modified-since")) h.set("if-modified-since", entry.lastModified);
+      }
+      return h;
+    }
+
+    // --- cache lookup --------------------------------------------------------
+    const useCache =
+      Boolean(cacheCfg) &&
+      finalMethod === "GET" &&
+      !ctx.init.body &&
+      cacheMode !== false &&
+      cacheMode !== "no-store";
+    const key = useCache ? cacheKey(finalMethod, ctx.url, finalHeaders) : null;
+    let entry = null;
+
+    const finish = async (response) => {
+      if (onResponse) await onResponse({ url: ctx.url, init: ctx.init, response });
+      if (throwHttpErrors && !response.ok) {
+        throw new HTTPError(response, { method: finalMethod, url: ctx.url });
+      }
+      return response;
+    };
+
+    if (useCache && cacheMode !== "reload") {
+      if (pendingStores.has(key)) await pendingStores.get(key);
+      entry = (await cacheCfg.store.get(key)) || null;
+      if (entry) {
+        const age = Date.now() - entry.storedAt;
+        if (age < cacheCfg.ttl) {
+          emit("hit", ctx.url);
+          return finish(entryToResponse(entry));
+        }
+        if (age < cacheCfg.ttl + cacheCfg.staleWhileRevalidate) {
+          emit("stale", ctx.url);
+          if (!revalidating.has(key)) {
+            revalidating.add(key);
+            const staleEntry = entry;
+            (async () => {
+              try {
+                const res = await network(conditionalHeaders(staleEntry), undefined);
+                if (res.status === 304) {
+                  staleEntry.storedAt = Date.now();
+                  await cacheCfg.store.set(key, staleEntry);
+                  emit("revalidated", ctx.url);
+                  await discardBody(res);
+                } else if (res.status === 200) {
+                  scheduleStore(key, res, ctx.url);
+                  await pendingStores.get(key);
+                } else {
+                  await discardBody(res);
+                }
+              } catch {
+                // keep serving the stale copy; try again next time
+              } finally {
+                revalidating.delete(key);
+              }
+            })();
+          }
+          return finish(entryToResponse(entry));
+        }
+      }
+    }
+
+    // --- network -------------------------------------------------------------
+    let response;
+    try {
+      response = await network(useCache ? conditionalHeaders(entry) : finalHeaders, signal);
     } catch (err) {
       // Present a user abort as the plain AbortError they caused, not as retry internals.
       if (err instanceof RetryAbortedError && signal && signal.aborted) throw signal.reason ?? err;
       throw err;
     }
 
-    if (onResponse) await onResponse({ url: ctx.url, init: ctx.init, response });
-    if (throwHttpErrors && !response.ok) {
-      throw new HTTPError(response, { method: finalMethod, url: ctx.url });
+    if (useCache) {
+      if (response.status === 304 && entry) {
+        entry.storedAt = Date.now();
+        await cacheCfg.store.set(key, entry);
+        emit("revalidated", ctx.url);
+        await discardBody(response);
+        response = entryToResponse(entry);
+      } else {
+        emit("miss", ctx.url);
+        if (response.status === 200) scheduleStore(key, response, ctx.url);
+      }
     }
-    return response;
+
+    return finish(response);
   }
 
   /** Like `request`, but resolves to the parsed JSON body (null for an empty body). */
@@ -210,7 +378,19 @@ function createFetch(defaults = {}) {
   };
 
   /** A new fetch with these defaults merged over the current ones (headers and retry are merged, the rest replaced). */
-  request.extend = (overrides = {}) => createFetch(mergeDefaults(defaults, overrides));
+  request.extend = (overrides = {}) =>
+    createFetch(
+      mergeDefaults(
+        {
+          ...defaults,
+          // children share the parent's budget, breakers and cache unless they bring their own
+          rateLimit: limiter || undefined,
+          circuitBreaker: breakerFor || undefined,
+          cache: cacheCfg || undefined,
+        },
+        overrides
+      )
+    );
 
   return request;
 }

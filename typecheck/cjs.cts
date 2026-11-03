@@ -7,3 +7,7 @@ export const q: string = reqkit.buildQuery({ a: 1 });
 export const limiter: reqkit.Limiter = reqkit.createLimiter(2);
 export const http: reqkit.ReqkitFetch = reqkit.createFetch({ baseUrl: "https://x.test" });
 export const stop: reqkit.StopRetry = new reqkit.StopRetry("x");
+export const rl: reqkit.RateLimiter = reqkit.createRateLimiter({ requests: 1 });
+export const breaker: reqkit.CircuitBreaker = reqkit.createCircuitBreaker();
+export const mock: reqkit.MockFetch = reqkit.createMockFetch();
+export const lines: AsyncGenerator<string, void, undefined> = reqkit.readLines(new Response("x"));
