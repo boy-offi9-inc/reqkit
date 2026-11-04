@@ -146,3 +146,35 @@ export async function checkStreamSSE(signal: AbortSignal) {
   for await (const ev of streamSSE("https://x.test/events", opts)) ids.push(ev.id);
   return ids;
 }
+
+import { paginate, paginatePages, paginateLinks, parseLinkHeader, type AuthOptions } from "@boy-offi9-inc/reqkit";
+
+export async function checkAuthAndPagination(signal: AbortSignal) {
+  let token = "t0";
+  const auth: AuthOptions = {
+    getToken: () => token,
+    refresh: async ({ token: old, response }) => {
+      void [old, response.status];
+      token = "t1";
+      return token;
+    },
+    header: "authorization",
+    scheme: "Bearer",
+    shouldRefresh: (res) => res.status === 401,
+  };
+  const api = createFetch({ baseUrl: "https://api.test", auth: { getToken: () => token, refresh: () => void (token = "t2") } });
+  const withAuth = createFetch({ auth });
+
+  const users: string[] = [];
+  for await (const u of paginate<string, string>(async (cursor, { index }) => ({ items: [`u${index}`], next: cursor === "c2" ? undefined : "c2" }), { maxItems: 5, signal })) {
+    users.push(u);
+  }
+  for await (const page of paginatePages<number>(async (offset) => ({ items: [Number(offset ?? 0)], next: undefined }), { start: 0 })) {
+    void [page.items, page.index, page.cursor];
+  }
+  const repos: { id: number }[] = [];
+  for await (const r of paginateLinks<{ id: number }>(api, "/repos", { maxPages: 3, signal })) repos.push(r);
+  for await (const x of paginateLinks(fetch, "https://x.test/y", { getItems: (d) => d.rows })) void x;
+  const links: Record<string, string> = parseLinkHeader('<a>; rel="next"', "https://x.test");
+  return [users, repos, links, withAuth];
+}

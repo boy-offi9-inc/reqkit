@@ -24,7 +24,7 @@ export function makeChecks(r) {
     "exports are present"() {
       for (const name of [
         "withRetry", "withTimeout", "normalizeError", "createFetch", "createMockFetch", "createLimiter",
-        "createRateLimiter", "createCircuitBreaker", "downloadResumable", "readSSE", "streamSSE", "readNDJSON", "readLines",
+        "createRateLimiter", "createCircuitBreaker", "downloadResumable", "readSSE", "streamSSE", "paginate", "paginateLinks", "readNDJSON", "readLines",
         "withDedupe", "withProgress", "buildQuery", "parseJsonSafe", "retryAfterAware", "HTTPError",
       ]) {
         assert(typeof r[name] === "function", `${name} is exported`);
@@ -130,6 +130,53 @@ export function makeChecks(r) {
       equal(seen.join(","), "one,two", "events across reconnects");
       equal(mock.calls[1].headers["last-event-id"], "a1", "Last-Event-ID on the first reconnect");
       equal(mock.calls[2].headers["last-event-id"], "a2", "Last-Event-ID on the second reconnect");
+    },
+
+    async "createFetch auth: one refresh for concurrent 401s"() {
+      const mock = r.createMockFetch();
+      let token = "old";
+      let refreshes = 0;
+      mock.get("/me").replyWith((call) => (call.headers.authorization === "Bearer new" ? { status: 200, body: { ok: true } } : { status: 401 }));
+      const api = r.createFetch({
+        fetch: mock.fetch,
+        baseUrl: "https://api.test",
+        retry: false,
+        auth: {
+          getToken: () => token,
+          refresh: async () => {
+            refreshes++;
+            await sleep(10);
+            token = "new";
+          },
+        },
+      });
+      const all = await Promise.all([api.json("/me"), api.json("/me"), api.json("/me")]);
+      assert(all.every((x) => x.ok), "all replayed successfully");
+      equal(refreshes, 1, "refresh calls");
+    },
+
+    async "paginate / paginateLinks walk pages lazily"() {
+      const pages = [[1, 2], [3, 4], [5]];
+      let fetched = 0;
+      const items = [];
+      for await (const x of r.paginate(async (cursor) => {
+        fetched++;
+        const i = cursor === undefined ? 0 : cursor;
+        return { items: pages[i], next: i + 1 < pages.length ? i + 1 : undefined };
+      })) items.push(x);
+      equal(items.join(","), "1,2,3,4,5", "items");
+
+      fetched = 0;
+      for await (const x of r.paginate(async () => (fetched++, { items: [1, 2, 3], next: "more" }), { maxItems: 2 })) void x;
+      equal(fetched, 1, "stopped before fetching a second page");
+
+      equal(r.parseLinkHeader('<https://x.test/p2>; rel="next"').next, "https://x.test/p2", "Link header");
+      const mock = r.createMockFetch();
+      mock.get("/p1").reply(200, [1], { headers: { link: '<https://t.test/p2>; rel="next"' } });
+      mock.get("/p2").reply(200, [2]);
+      const got = [];
+      for await (const x of r.paginateLinks(mock.fetch, "https://t.test/p1")) got.push(x);
+      equal(got.join(","), "1,2", "paginateLinks items");
     },
 
     async "downloadResumable resumes after a dropped connection"() {

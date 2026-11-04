@@ -15,6 +15,7 @@ const { createMockFetch } = require("./createMockFetch");
 const { downloadResumable } = require("./downloadResumable");
 const { readLines, readNDJSON, readSSE } = require("./streams");
 const { streamSSE } = require("./streamSSE");
+const { paginate, paginatePages, paginateLinks, parseLinkHeader } = require("./paginate");
 
 module.exports = {
   withRetry,
@@ -44,4 +45,8 @@ module.exports = {
   readNDJSON,
   readSSE,
   streamSSE,
+  paginate,
+  paginatePages,
+  paginateLinks,
+  parseLinkHeader,
 };

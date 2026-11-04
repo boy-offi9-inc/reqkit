@@ -12,3 +12,4 @@ export const breaker: reqkit.CircuitBreaker = reqkit.createCircuitBreaker();
 export const mock: reqkit.MockFetch = reqkit.createMockFetch();
 export const lines: AsyncGenerator<string, void, undefined> = reqkit.readLines(new Response("x"));
 export const sse: AsyncGenerator<reqkit.SSEEvent, void, undefined> = reqkit.streamSSE("https://x.test/e");
+export const pages: AsyncGenerator<number, void, undefined> = reqkit.paginate(async () => ({ items: [1] }));

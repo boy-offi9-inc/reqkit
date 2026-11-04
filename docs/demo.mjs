@@ -12,6 +12,7 @@ import {
   downloadResumable,
   readSSE,
   streamSSE,
+  paginateLinks,
 } from "./reqkit.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -272,6 +273,79 @@ await api.json("/config");`,
       const clean = seen.join(",") === "1,2,3,4,5,6";
       say(`${clean ? "✓" : "✗"} received ${seen.join(", ")} over ${mock.calls.length} connections${clean ? " — no gaps, no duplicates" : ""}`);
       return { events: seen, connections: mock.calls.length, lastEventIdSent: mock.calls[1] && mock.calls[1].headers["last-event-id"] };
+    },
+  },
+
+  {
+    id: "auth-refresh",
+    title: "Token refresh — once, not five times",
+    blurb: "Five requests go out with an expired token and all get 401. reqkit refreshes the token ONCE, shares it with every waiting request, and replays all five.",
+    code: `const api = createFetch({
+  auth: {
+    getToken: () => token,
+    refresh: async () => { token = await login(); },
+  },
+});
+await Promise.all(urls.map((u) => api.json(u)));`,
+    async run(log, { scale = 1 } = {}) {
+      const { say } = makeClock(log);
+      let token = "expired";
+      const valid = "fresh-token";
+      let refreshes = 0;
+      const mock = createMockFetch();
+      mock.get(/\/api\//).replyWith((call) =>
+        call.headers.authorization === `Bearer ${valid}` ? { status: 200, body: { ok: true } } : { status: 401, body: "token expired" }
+      );
+
+      const api = createFetch({
+        baseUrl: "https://api.demo",
+        fetch: traced(mock.fetch, say),
+        retry: false,
+        auth: {
+          getToken: () => token,
+          refresh: async () => {
+            refreshes++;
+            say("   🔑 refreshing the token… (other requests wait for this one refresh)");
+            await sleep(250 * scale);
+            token = valid;
+            say("   🔑 new token issued");
+          },
+        },
+      });
+
+      say("sending 5 requests with an expired token…");
+      const results = await Promise.all(Array.from({ length: 5 }, (_, i) => api.json(`/api/item/${i + 1}`)));
+      say(`✓ all ${results.length} succeeded — ${refreshes} refresh, ${mock.calls.length} requests (5 rejected + 5 replayed)`);
+      return { refreshes, requests: mock.calls.length, ok: results.every((r) => r.ok) };
+    },
+  },
+
+  {
+    id: "pagination",
+    title: "Pagination with Link headers",
+    blurb: "The API has 5 pages of 10 items and sends Link headers. paginateLinks follows rel=\"next\" lazily — ask for 25 items and pages 4 and 5 are never requested.",
+    code: `for await (const repo of paginateLinks(api, "/repos?page=1", {
+  maxItems: 25,
+})) { ... }`,
+    async run(log, { scale = 1 } = {}) {
+      const { say } = makeClock(log);
+      const mock = createMockFetch();
+      mock.get(/\/repos/).replyWith(async (call) => {
+        await sleep(60 * scale);
+        const page = Number(new URL(call.url).searchParams.get("page") || 1);
+        const items = Array.from({ length: 10 }, (_, i) => ({ id: (page - 1) * 10 + i + 1 }));
+        const headers = page < 5 ? { link: `<https://api.demo/repos?page=${page + 1}>; rel="next", <https://api.demo/repos?page=5>; rel="last"` } : {};
+        return { status: 200, body: items, headers };
+      });
+      const api = createFetch({ baseUrl: "https://api.demo", fetch: traced(mock.fetch, say), retry: false });
+
+      let count = 0;
+      for await (const repo of paginateLinks(api, "/repos?page=1", { maxItems: 25 })) {
+        count++;
+        if (count % 5 === 0) say(`   …item #${repo.id}`);
+      }
+      say(`✓ collected ${count} items from ${mock.calls.length} pages — pages 4 and 5 were never requested`);
+      return { items: count, requests: mock.calls.length };
     },
   },
 

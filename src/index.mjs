@@ -28,6 +28,10 @@ export const {
   readNDJSON,
   readSSE,
   streamSSE,
+  paginate,
+  paginatePages,
+  paginateLinks,
+  parseLinkHeader,
 } = reqkit;
 
 export default reqkit;

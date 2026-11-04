@@ -1,28 +1,82 @@
 name: Publish
 
-# Publishes to npm with provenance when you create a GitHub Release.
-# Requires an NPM_TOKEN repository secret (npm automation/granular token).
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+    paths: [package.json]
+  workflow_dispatch:
 
 permissions:
-  contents: read
-  id-token: write # required for npm provenance
+  contents: write
+  id-token: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      - run: npm install --no-audit --no-fund
-      - run: npm run build
-      - run: npm test
-      - run: npm run typecheck
-      - run: npm publish --provenance --access public
+
+      - name: Is this version already on npm?
+        id: check
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          if OUT=$(npm view "$NAME@$VERSION" version 2>&1); then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Nothing to publish::$NAME@$VERSION is already on npm."
+          elif echo "$OUT" | grep -q "E404"; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Publishing::$NAME@$VERSION is new."
+          else
+          
+            echo "$OUT"
+            exit 1
+          fi
+
+      - name: Install
+        if: steps.check.outputs.publish == 'true'
+        run: npm install --no-audit --no-fund
+
+      - name: Build, test, typecheck, smoke
+        if: steps.check.outputs.publish == 'true'
+        run: |
+          npm run build
+          npm test
+          npm run typecheck
+          npm run smoke
+
+      - name: Publish to npm
+        if: steps.check.outputs.publish == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          TAG=latest
+          case "$VERSION" in *-*) TAG=next ;; esac
+          npm publish --provenance --access public --tag "$TAG"
+
+      - name: Tag and create the GitHub Release
+        if: steps.check.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          FLAGS="--generate-notes"
+          case "$VERSION" in *-*) FLAGS="$FLAGS --prerelease" ;; esac
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            echo "Release v$VERSION already exists — skipping."
+          else
+            gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" $FLAGS
+          fi

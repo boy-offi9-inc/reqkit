@@ -33,7 +33,7 @@ async function loadDemos() {
 
 test("every playground demo runs to completion against the fake server", async () => {
   const demos = await loadDemos();
-  assert.deepEqual(demos.map((d) => d.id), ["retry", "ratelimit", "breaker", "cache", "sse", "sse-reconnect", "resume"]);
+  assert.deepEqual(demos.map((d) => d.id), ["retry", "ratelimit", "breaker", "cache", "sse", "sse-reconnect", "auth-refresh", "pagination", "resume"]);
   for (const demo of demos) {
     const lines = [];
     await demo.run((l) => lines.push(l), { scale: 0.05 });
@@ -57,6 +57,13 @@ test("demo outcomes are what the blurbs promise", async () => {
   assert.deepEqual(reconnect.events, [1, 2, 3, 4, 5, 6]);
   assert.equal(reconnect.connections, 2);
   assert.equal(reconnect.lastEventIdSent, "3");
+  const auth = await run("auth-refresh");
+  assert.equal(auth.refreshes, 1, "five rejected requests, one refresh");
+  assert.equal(auth.requests, 10);
+  assert.equal(auth.ok, true);
+  const pagination = await run("pagination");
+  assert.equal(pagination.items, 25);
+  assert.equal(pagination.requests, 3, "pages 4 and 5 never requested");
   const resume = await run("resume");
   assert.equal(resume.intact, true);
   assert.equal(resume.requests, 2);

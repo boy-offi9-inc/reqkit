@@ -54,6 +54,18 @@ function originOf(url) {
   }
 }
 
+// One in-flight token refresh per `auth` config object, so concurrent 401s —
+// even across extend() children — trigger exactly one refresh.
+const refreshStates = new WeakMap();
+function refreshStateFor(auth) {
+  let state = refreshStates.get(auth);
+  if (!state) {
+    state = { inflight: null };
+    refreshStates.set(auth, state);
+  }
+  return state;
+}
+
 function mergeDefaults(base, extra) {
   const merged = { ...base, ...extra };
 
@@ -87,6 +99,8 @@ function mergeDefaults(base, extra) {
  *  - `cache`: in-memory GET cache with TTL, stale-while-revalidate and
  *    ETag / Last-Modified revalidation (304s)
  *  - concurrent GET de-duplication (withDedupe)
+ *  - `auth`: attach a token, and on a 401 refresh it ONCE (shared by all
+ *    concurrent requests) and replay the request
  *  - `HTTPError` on non-2xx (turn off with `throwHttpErrors: false`)
  *  - `onRequest` / `onResponse` hooks
  *
@@ -104,6 +118,11 @@ function mergeDefaults(base, extra) {
  *   a per-origin breaker, a createCircuitBreaker() instance, or `(url) => breaker`
  * @param {boolean | object} [defaults.cache] - `{ ttl, staleWhileRevalidate,
  *   maxEntries, maxBodyBytes, store, onEvent }`; `true` = 60s TTL
+ * @param {object} [defaults.auth] - `{ getToken, refresh, header?, scheme?, shouldRefresh? }`.
+ *   `getToken()` supplies the current token (sync or async); on a 401 (or
+ *   whatever `shouldRefresh(response)` says) `refresh({ token, response })` is
+ *   called once for all concurrent callers and the request is replayed with the
+ *   new token. `header` defaults to "authorization", `scheme` to "Bearer" ("" for none).
  * @param {boolean} [defaults.dedupe=false] - merge identical concurrent GET/HEAD calls
  * @param {boolean} [defaults.throwHttpErrors=true]
  * @param {typeof fetch} [defaults.fetch=globalThis.fetch]
@@ -120,6 +139,7 @@ function createFetch(defaults = {}) {
     rateLimit,
     circuitBreaker,
     cache,
+    auth,
     dedupe = false,
     throwHttpErrors: defaultThrow = true,
     fetch: customFetch,
@@ -190,6 +210,27 @@ function createFetch(defaults = {}) {
     pendingStores.set(key, p);
   }
 
+  // Returns a token newer than `usedToken`, refreshing at most once no matter
+  // how many requests were rejected at the same time. If someone else already
+  // refreshed (the current token isn't the one we used), just use that.
+  async function obtainFreshToken(authCfg, tokenUsed, response) {
+    const current = await authCfg.getToken();
+    if (current && current !== tokenUsed) return current;
+
+    const state = refreshStateFor(authCfg);
+    if (!state.inflight) {
+      state.inflight = (async () => {
+        try {
+          const out = await authCfg.refresh({ token: tokenUsed, response });
+          return typeof out === "string" && out ? out : await authCfg.getToken();
+        } finally {
+          state.inflight = null;
+        }
+      })();
+    }
+    return state.inflight;
+  }
+
   async function request(input, init = {}) {
     const {
       query,
@@ -216,6 +257,15 @@ function createFetch(defaults = {}) {
     if (onRequest) await onRequest(ctx);
     const finalHeaders = ctx.init.headers instanceof Headers ? ctx.init.headers : new Headers(ctx.init.headers);
     const finalMethod = String(ctx.init.method || method).toUpperCase();
+
+    // --- auth: attach the current token (unless the caller set the header) ----
+    const authHeader = auth ? String(auth.header || "authorization").toLowerCase() : null;
+    const formatToken = (token) => (auth.scheme === "" ? String(token) : `${auth.scheme === undefined ? "Bearer" : auth.scheme} ${token}`);
+    let usedToken = null;
+    if (auth && !finalHeaders.has(authHeader)) {
+      usedToken = (await auth.getToken()) || null;
+      if (usedToken) finalHeaders.set(authHeader, formatToken(usedToken));
+    }
 
     // --- retry policy ------------------------------------------------------
     const retryCfg = retryOpt === false || defaultRetry === false ? false : { ...defaultRetry, ...retryOpt };
@@ -292,7 +342,7 @@ function createFetch(defaults = {}) {
       !ctx.init.body &&
       cacheMode !== false &&
       cacheMode !== "no-store";
-    const key = useCache ? cacheKey(finalMethod, ctx.url, finalHeaders) : null;
+    let key = useCache ? cacheKey(finalMethod, ctx.url, finalHeaders) : null;
     let entry = null;
 
     const finish = async (response) => {
@@ -351,6 +401,24 @@ function createFetch(defaults = {}) {
       // Present a user abort as the plain AbortError they caused, not as retry internals.
       if (err instanceof RetryAbortedError && signal && signal.aborted) throw signal.reason ?? err;
       throw err;
+    }
+
+    // --- auth: a rejected token is refreshed once, then the request replays ----
+    const needsRefresh = auth && (auth.shouldRefresh ? auth.shouldRefresh(response) : response.status === 401);
+    if (usedToken && needsRefresh && !isStreamBody(ctx.init.body)) {
+      const fresh = await obtainFreshToken(auth, usedToken, response);
+      if (fresh) {
+        await discardBody(response);
+        finalHeaders.set(authHeader, formatToken(fresh));
+        entry = null; // belongs to the old token's cache key
+        if (useCache) key = cacheKey(finalMethod, ctx.url, finalHeaders);
+        try {
+          response = await network(finalHeaders, signal);
+        } catch (err) {
+          if (err instanceof RetryAbortedError && signal && signal.aborted) throw signal.reason ?? err;
+          throw err;
+        }
+      }
     }
 
     if (useCache) {

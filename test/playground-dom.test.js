@@ -63,7 +63,7 @@ test("docs/index.html's inline script renders every demo and the Run buttons wor
     // keep `document` until the click below has run
   }
 
-  assert.equal(container.children.length, 7, "one card per demo");
+  assert.equal(container.children.length, 9, "one card per demo");
   const titles = container.children.map((card) => card.children[0].textContent);
   assert.ok(titles.includes("Retry that obeys Retry-After"));
 

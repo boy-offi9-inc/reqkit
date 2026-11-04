@@ -56,6 +56,7 @@ const pages = await limit.map(urls, (url) =>
 Try everything in your browser — retries obeying `Retry-After`, rate limiting, the circuit breaker, caching, SSE streaming, an SSE stream that reconnects itself, and a resumable download that survives a dropped connection. It runs against a fake in-memory server, so there's nothing to install and no network involved.
 
 Run it locally: `npm run build && python3 -m http.server -d docs` → open `http://localhost:8000`. (ES modules don't load from `file://`, so it needs a server.)
+
 ## Works with what you already use
 
 Recipes for **axios, ky, got, undici/node-fetch**, testing, and LLM streaming live in [RECIPES.md](./RECIPES.md): keep your client, bolt on just the piece you're missing (`Retry-After`-aware retries, a rate limiter, a circuit breaker).
@@ -90,6 +91,8 @@ Recipes for **axios, ky, got, undici/node-fetch**, testing, and LLM streaming li
 | Slow down *before* the server says 429 (obey `X-RateLimit-*`) | [`createRateLimiter`](#createratelimiteropts) |
 | Stop hammering a service that keeps failing | [`createCircuitBreaker`](#createcircuitbreakeropts) |
 | Cache GETs (TTL, stale-while-revalidate, ETag/304) | [`createFetch` → `cache`](#caching) |
+| Attach a token and refresh it on 401 — once, even with many requests in flight | [`createFetch` → `auth`](#auth-token-refresh) |
+| Walk a paginated API (cursor, offset, `Link` headers) | [`paginate` / `paginateLinks`](#pagination-paginate-paginatepages-paginatelinks) |
 | Resume a download after the connection drops | [`downloadResumable`](#downloadresumableurl-opts) |
 | Stay connected to an SSE endpoint (auto-reconnect, `Last-Event-ID`) | [`streamSSE`](#auto-reconnecting-sse-streamsse) |
 | Read SSE / NDJSON / lines from a streamed body (LLM tokens!) | [`readSSE` / `readNDJSON` / `readLines`](#streaming-readsse-readndjson-readlines) |
@@ -361,6 +364,42 @@ for await (const line of readLines(response)) console.log(line);
 
 `readSSE` follows the spec: multi-line `data:` is joined with `\n`, comments are ignored, `event` defaults to `"message"`, `id` carries over, `retry` is parsed, and an event cut off by the end of the stream is dropped. `readNDJSON` skips blank lines and names the bad line on a parse error (or pass `skipInvalid: true`). Line splitting handles `\n`, `\r\n`, `\r`, a BOM, and multi-byte characters split across chunks.
 
+### Pagination: `paginate`, `paginatePages`, `paginateLinks`
+
+Walk any paginated API with a plain `for await` loop. Pages are fetched **lazily** — `break` out early (or set `maxItems`) and the pages you didn't need are never requested.
+
+```js
+import { paginate, paginateLinks } from "@boy-offi9-inc/reqkit";
+
+// Cursor-based: you say how to fetch a page and what the next cursor is
+for await (const user of paginate(async (cursor) => {
+  const r = await api.json("/users", { query: { cursor, limit: 100 } });
+  return { items: r.data, next: r.next_cursor };   // undefined/null on the last page
+}, { maxItems: 500 })) {
+  console.log(user.name);
+}
+
+// Offset-based is the same idea: the cursor is just a number
+for await (const row of paginate(async (offset = 0) => {
+  const rows = await api.json("/rows", { query: { offset, limit: 50 } });
+  return { items: rows, next: rows.length === 50 ? offset + 50 : undefined };
+})) { /* ... */ }
+
+// GitHub-style `Link: <...>; rel="next"` headers — nothing to write
+for await (const repo of paginateLinks(api, "/orgs/acme/repos?per_page=100")) {
+  console.log(repo.full_name);
+}
+```
+
+| API | What it does |
+|---|---|
+| `paginate(fetchPage, opts?)` | yields **items**; `opts`: `start`, `maxPages`, `maxItems`, `signal` |
+| `paginatePages(fetchPage, opts?)` | yields **pages** `{ items, index, cursor }` |
+| `paginateLinks(request, url, opts?)` | follows `Link` `rel="next"`; `request` is any fetch-like (a `createFetch` instance or plain `fetch` — a non-2xx page throws `HTTPError`); `getItems(data)` defaults to the body if it's an array, else `items` / `data` / `results` / `records` |
+| `parseLinkHeader(header, base?)` | RFC 8288 `Link` parser → `{ next, prev, first, last, ... }`; handles commas in URLs and quoted params |
+
+A `next` that equals the cursor just used (or a `Link` that points back at the same page) throws `code: "PAGINATE_STUCK"` instead of looping forever.
+
 ### Auto-reconnecting SSE: `streamSSE`
 
 `readSSE` parses a stream you already have; **`streamSSE` opens it for you and keeps it open.** When the connection drops (or the server closes it) it reconnects by itself and sends `Last-Event-ID`, so the server can resume where you left off — what the browser's `EventSource` does, but built on `fetch`: custom headers, POST bodies, `AbortSignal`, your own client.
@@ -463,12 +502,35 @@ const admin = api.extend({ headers: { "x-role": "admin" } }); // merges over the
 | `retry` | see below | `false` disables; otherwise `{ retries, statusCodes, methods, baseDelayMs, maxDelayMs, factor, jitter, maxRetryTime, shouldRetry, calculateDelay, onRetry }` |
 | `rateLimit` | — | `true` just learns from `X-RateLimit-*` / `Retry-After`; `{ requests, perMs }` also enforces a budget; or pass a shared [`createRateLimiter`](#createratelimiteropts) |
 | `circuitBreaker` | — | `true` / options → one breaker **per origin**; or pass a shared [`createCircuitBreaker`](#createcircuitbreakeropts), or `(url) => breaker`. An open circuit stops retries immediately. |
+| `auth` | — | attach a token and refresh it on 401 — see [Auth token refresh](#auth-token-refresh) |
 | `cache` | — | in-memory GET cache — see [Caching](#caching). `true` = 60s TTL. Per request: `cache: false` bypasses, `"reload"` refreshes |
 | `dedupe` | `false` | merge identical concurrent `GET`/`HEAD` calls; every caller gets its own readable clone. Requests with their own `signal` are never merged. |
 | `throwHttpErrors` | `true` | throw `HTTPError` for non-2xx (`err.status`, `err.response`, `err.url`, `err.method`) |
 | `fetch` | `globalThis.fetch` | swap in undici, node-fetch, a test double... |
 | `onRequest(ctx)` | — | once per call; may mutate `ctx.url` / `ctx.init` (e.g. add a header) |
 | `onResponse(ctx)` | — | once per call, with the final response, before `HTTPError` is thrown |
+
+#### Auth token refresh
+
+```js
+let token = await loadToken();
+
+const api = createFetch({
+  baseUrl: "https://api.example.com",
+  auth: {
+    getToken: () => token,                                // attached as `Authorization: Bearer <token>`
+    refresh: async () => { token = await loginAgain(); }, // called on 401 — ONCE, however many requests are waiting
+  },
+});
+
+await Promise.all(urls.map((u) => api.json(u))); // 20 requests, all 401 → one refresh, all 20 replayed
+```
+
+- **Single-flight:** concurrent 401s share one `refresh()` call. A request rejected *after* someone else already refreshed notices the token changed and just replays with the new one — no second refresh.
+- **Replay once:** if the replay is rejected too, you get the `401` (as `HTTPError`) — it never loops. Request bodies (JSON, strings…) are re-sent; a stream body can't be replayed, so its 401 is surfaced as is.
+- **Your header wins:** if a request sets its own `Authorization`, reqkit leaves it alone and won't refresh it.
+- **Options:** `header` (default `"authorization"`), `scheme` (default `"Bearer"`, `""` for a bare token such as an `X-API-Key`), `shouldRefresh(response)` (default: status 401). `refresh({ token, response })` may return the new token or just update your store. If `refresh` throws, every waiting request rejects with that error — and the next request tries again.
+- `extend()` children that share the same `auth` object share one refresh; the cache keys entries per token.
 
 #### Caching
 
