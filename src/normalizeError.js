@@ -54,7 +54,7 @@ function isNetworkCode(code) {
 
 // Browsers and Node throw a bare TypeError for network-level fetch failures.
 const FETCH_NETWORK_MESSAGE =
-  /fetch failed|failed to fetch|network ?request failed|load failed|networkerror when attempting to fetch/i;
+  /fetch failed|failed to fetch|network ?request failed|load failed|networkerror when attempting to fetch|^terminated$|^network error$/i;
 
 function isFetchNetworkTypeError(err) {
   return err.name === "TypeError" && FETCH_NETWORK_MESSAGE.test(err.message || "");

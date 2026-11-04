@@ -127,3 +127,22 @@ export async function check040(res: Response, signal: AbortSignal) {
 // the dependency-free bundle has the same types
 import { createFetch as createFetchBrowser, withRetry as withRetryBrowser } from "@boy-offi9-inc/reqkit/browser";
 export const viaBundle = [createFetchBrowser({ baseUrl: "https://x.test" }), withRetryBrowser];
+
+import { streamSSE, type StreamSSEOptions } from "@boy-offi9-inc/reqkit";
+
+export async function checkStreamSSE(signal: AbortSignal) {
+  const opts: StreamSSEOptions = {
+    signal,
+    method: "POST",
+    body: "{}",
+    reconnect: true,
+    retries: Infinity,
+    headers: async () => ({ authorization: "Bearer t" }),
+    stopWhen: (e) => e.data === "[DONE]",
+    onReconnect: ({ reason, attempt, delayMs, lastEventId }) => void [reason, attempt, delayMs, lastEventId],
+    onOpen: ({ connections }) => void connections,
+  };
+  const ids: string[] = [];
+  for await (const ev of streamSSE("https://x.test/events", opts)) ids.push(ev.id);
+  return ids;
+}

@@ -11,6 +11,7 @@ import {
   CircuitOpenError,
   downloadResumable,
   readSSE,
+  streamSSE,
 } from "./reqkit.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -217,6 +218,60 @@ await api.json("/config");`,
       }
       say("✓ stream finished");
       return { text };
+    },
+  },
+
+  {
+    id: "sse-reconnect",
+    title: "SSE that reconnects itself",
+    blurb: "The stream drops after event 3. streamSSE reconnects on its own and sends Last-Event-ID, so the server continues from event 4 — no gaps, no duplicates.",
+    code: `for await (const ev of streamSSE(url, {
+  stopWhen: (e) => e.data === "[DONE]",
+  onReconnect: ({ lastEventId }) => ...,
+})) { ... }`,
+    async run(log, { scale = 1 } = {}) {
+      const { say } = makeClock(log);
+      const enc = new TextEncoder();
+      const mock = createMockFetch();
+
+      mock.get("/events").replyWith((call) => {
+        const from = Number(call.headers["last-event-id"] || 0);
+        const chunks = [];
+        const drop = from === 0;
+        for (let n = from + 1; n <= (drop ? 3 : 6); n++) chunks.push(`id: ${n}\ndata: ${JSON.stringify({ n })}\n\n`);
+        if (!drop) chunks.push("data: [DONE]\n\n");
+        let i = 0;
+        return new Response(
+          new ReadableStream({
+            async pull(controller) {
+              if (i < chunks.length) {
+                await sleep(90 * scale);
+                controller.enqueue(enc.encode(chunks[i++]));
+              } else if (drop) {
+                controller.error(Object.assign(new TypeError("terminated"), { cause: Object.assign(new Error("connection reset"), { code: "ECONNRESET" }) }));
+              } else {
+                controller.close();
+              }
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } }
+        );
+      });
+
+      const seen = [];
+      for await (const ev of streamSSE("https://api.demo/events", {
+        fetch: traced(mock.fetch, say),
+        reconnectDelayMs: 300 * scale,
+        stopWhen: (e) => e.data === "[DONE]",
+        onReconnect: ({ delayMs, lastEventId }) => say(`   ✂ stream dropped — reconnecting in ${Math.round(delayMs)}ms with Last-Event-ID: ${lastEventId}`),
+      })) {
+        if (ev.data === "[DONE]") break;
+        seen.push(JSON.parse(ev.data).n);
+        say(`   event id=${ev.id}`);
+      }
+      const clean = seen.join(",") === "1,2,3,4,5,6";
+      say(`${clean ? "✓" : "✗"} received ${seen.join(", ")} over ${mock.calls.length} connections${clean ? " — no gaps, no duplicates" : ""}`);
+      return { events: seen, connections: mock.calls.length, lastEventIdSent: mock.calls[1] && mock.calls[1].headers["last-event-id"] };
     },
   },
 

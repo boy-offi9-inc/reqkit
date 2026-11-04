@@ -11,3 +11,4 @@ export const rl: reqkit.RateLimiter = reqkit.createRateLimiter({ requests: 1 });
 export const breaker: reqkit.CircuitBreaker = reqkit.createCircuitBreaker();
 export const mock: reqkit.MockFetch = reqkit.createMockFetch();
 export const lines: AsyncGenerator<string, void, undefined> = reqkit.readLines(new Response("x"));
+export const sse: AsyncGenerator<reqkit.SSEEvent, void, undefined> = reqkit.streamSSE("https://x.test/e");

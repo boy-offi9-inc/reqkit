@@ -27,6 +27,7 @@ export const {
   readLines,
   readNDJSON,
   readSSE,
+  streamSSE,
 } = reqkit;
 
 export default reqkit;

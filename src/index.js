@@ -14,6 +14,7 @@ const { createMemoryCache } = require("./createMemoryCache");
 const { createMockFetch } = require("./createMockFetch");
 const { downloadResumable } = require("./downloadResumable");
 const { readLines, readNDJSON, readSSE } = require("./streams");
+const { streamSSE } = require("./streamSSE");
 
 module.exports = {
   withRetry,
@@ -42,4 +43,5 @@ module.exports = {
   readLines,
   readNDJSON,
   readSSE,
+  streamSSE,
 };

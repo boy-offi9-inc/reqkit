@@ -48,13 +48,18 @@ const pages = await limit.map(urls, (url) =>
   )
 );
 ```
+
+> **New in 0.5.0:** an [interactive playground](#playground) (try every feature in your browser, no install), a dependency-free **ESM bundle** for browsers / Deno / Bun / Workers (`@boy-offi9-inc/reqkit/browser`), [recipes](./RECIPES.md) for axios, ky, got and undici, and multi-runtime CI. See the [CHANGELOG](./CHANGELOG.md).
+>
+> **0.4.0:** proactive rate limiter, circuit breaker, response cache (TTL + stale-while-revalidate + ETag), resumable downloads, SSE/NDJSON stream readers and a mock-fetch test helper.
+
 ---
 
 ## Playground
 
-Try everything in your browser — retries obeying `Retry-After`, rate limiting, the circuit breaker, caching, SSE streaming and a resumable download that survives a dropped connection. It runs against a fake in-memory server, so there's nothing to install and no network involved.
+Try everything in your browser — retries obeying `Retry-After`, rate limiting, the circuit breaker, caching, SSE streaming, an SSE stream that reconnects itself, and a resumable download that survives a dropped connection. It runs against a fake in-memory server, so there's nothing to install and no network involved.
 
-Run it locally: `npm run build && python3 -m http.server -d docs` → open `http://localhost:8000`. (ES modules don't load from `file://`, so it needs a server.)
+Run it locally: `npm run build && python3 -m http.server -d docs` → open `http://localhost:8000`. (ES modules don't load from `file://`, so it needs a server.) The repo's `pages.yml` workflow publishes the same folder to GitHub Pages — enable it once under Settings → Pages → Source: "GitHub Actions".
 
 ## Works with what you already use
 
@@ -91,6 +96,7 @@ Recipes for **axios, ky, got, undici/node-fetch**, testing, and LLM streaming li
 | Stop hammering a service that keeps failing | [`createCircuitBreaker`](#createcircuitbreakeropts) |
 | Cache GETs (TTL, stale-while-revalidate, ETag/304) | [`createFetch` → `cache`](#caching) |
 | Resume a download after the connection drops | [`downloadResumable`](#downloadresumableurl-opts) |
+| Stay connected to an SSE endpoint (auto-reconnect, `Last-Event-ID`) | [`streamSSE`](#auto-reconnecting-sse-streamsse) |
 | Read SSE / NDJSON / lines from a streamed body (LLM tokens!) | [`readSSE` / `readNDJSON` / `readLines`](#streaming-readsse-readndjson-readlines) |
 | Test retry/timeout code without a network | [`createMockFetch`](#createmockfetch) |
 | All of the above, wired up | [`createFetch`](#createfetchdefaults) |
@@ -359,6 +365,33 @@ for await (const line of readLines(response)) console.log(line);
 ```
 
 `readSSE` follows the spec: multi-line `data:` is joined with `\n`, comments are ignored, `event` defaults to `"message"`, `id` carries over, `retry` is parsed, and an event cut off by the end of the stream is dropped. `readNDJSON` skips blank lines and names the bad line on a parse error (or pass `skipInvalid: true`). Line splitting handles `\n`, `\r\n`, `\r`, a BOM, and multi-byte characters split across chunks.
+
+### Auto-reconnecting SSE: `streamSSE`
+
+`readSSE` parses a stream you already have; **`streamSSE` opens it for you and keeps it open.** When the connection drops (or the server closes it) it reconnects by itself and sends `Last-Event-ID`, so the server can resume where you left off — what the browser's `EventSource` does, but built on `fetch`: custom headers, POST bodies, `AbortSignal`, your own client.
+
+```js
+import { streamSSE } from "@boy-offi9-inc/reqkit";
+
+for await (const { id, data } of streamSSE("https://api.example.com/events", {
+  headers: () => ({ authorization: `Bearer ${getToken()}` }), // re-evaluated on every reconnect
+  onReconnect: ({ reason, delayMs, lastEventId }) => console.log(`reconnecting in ${delayMs}ms from id ${lastEventId}`),
+  signal,
+})) {
+  handle(data);
+}
+```
+
+| Behavior | Details |
+|---|---|
+| Resume | `Last-Event-ID` (the last `id:` seen) is sent on every reconnect; `lastEventId` option resumes on the first connect too |
+| Delay | the server's `retry: <ms>` field sets the base delay (like `EventSource`); waits then back off exponentially up to `maxDelayMs` while connecting keeps failing; `Retry-After` on 429/503 is honored |
+| Giving up | `retries` (default 10) counts consecutive attempts **without progress** — a connection that delivered an event resets it. Then it throws the last error |
+| Stopping | HTTP `204` ends the stream (the standard "don't reconnect"); `stopWhen: e => e.data === "[DONE]"`; `break`ing out of the loop or aborting `signal` closes the connection |
+| Fatal | a non-retryable status (401, 404…) throws `HTTPError` right away; a response that isn't `text/event-stream` throws (`code: "SSE_BAD_CONTENT_TYPE"`) |
+| POST streams | **only GET reconnects by default** — re-sending a POST (say, an LLM prompt) could repeat side effects, so POST streams just end or throw unless you pass `reconnect: true` |
+
+It takes any fetch: `streamSSE(url, { fetch: api })` with a `createFetch` instance works too.
 
 ### `downloadResumable(url, opts?)`
 

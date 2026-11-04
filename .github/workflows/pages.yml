@@ -1,6 +1,7 @@
 name: Playground
 
-
+# Publishes docs/ (the interactive playground) to GitHub Pages.
+# One-time setup: repo Settings → Pages → Source: "GitHub Actions".
 on:
   push:
     branches: [main]

@@ -33,7 +33,7 @@ async function loadDemos() {
 
 test("every playground demo runs to completion against the fake server", async () => {
   const demos = await loadDemos();
-  assert.deepEqual(demos.map((d) => d.id), ["retry", "ratelimit", "breaker", "cache", "sse", "resume"]);
+  assert.deepEqual(demos.map((d) => d.id), ["retry", "ratelimit", "breaker", "cache", "sse", "sse-reconnect", "resume"]);
   for (const demo of demos) {
     const lines = [];
     await demo.run((l) => lines.push(l), { scale: 0.05 });
@@ -53,6 +53,10 @@ test("demo outcomes are what the blurbs promise", async () => {
   assert.equal(breaker.requests, 4, "3 failures + 1 probe — nothing sent while open");
   assert.equal((await run("cache")).requests, 2, "miss + revalidation; the middle call was a hit");
   assert.equal((await run("sse")).text, "reqkit streams tokens as they arrive.");
+  const reconnect = await run("sse-reconnect");
+  assert.deepEqual(reconnect.events, [1, 2, 3, 4, 5, 6]);
+  assert.equal(reconnect.connections, 2);
+  assert.equal(reconnect.lastEventIdSent, "3");
   const resume = await run("resume");
   assert.equal(resume.intact, true);
   assert.equal(resume.requests, 2);

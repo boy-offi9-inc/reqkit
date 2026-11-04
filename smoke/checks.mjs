@@ -24,7 +24,7 @@ export function makeChecks(r) {
     "exports are present"() {
       for (const name of [
         "withRetry", "withTimeout", "normalizeError", "createFetch", "createMockFetch", "createLimiter",
-        "createRateLimiter", "createCircuitBreaker", "downloadResumable", "readSSE", "readNDJSON", "readLines",
+        "createRateLimiter", "createCircuitBreaker", "downloadResumable", "readSSE", "streamSSE", "readNDJSON", "readLines",
         "withDedupe", "withProgress", "buildQuery", "parseJsonSafe", "retryAfterAware", "HTTPError",
       ]) {
         assert(typeof r[name] === "function", `${name} is exported`);
@@ -116,6 +116,20 @@ export function makeChecks(r) {
       equal(events.length, 2, "event count");
       equal(events[1].data, "b\nc", "multi-line data");
       equal(events[1].event, "x", "event name");
+    },
+
+    async "streamSSE reconnects with Last-Event-ID"() {
+      const mock = r.createMockFetch();
+      const body = (text) =>
+        new Response(new ReadableStream({ start: (c) => (c.enqueue(new TextEncoder().encode(text)), c.close()) }), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      mock.get("/events").replyWithOnce(() => body("id: a1\ndata: one\n\n")).replyWithOnce(() => body("id: a2\ndata: two\n\n")).reply(204);
+      const seen = [];
+      for await (const ev of r.streamSSE("https://t.test/events", { fetch: mock.fetch, reconnectDelayMs: 1, maxDelayMs: 5 })) seen.push(ev.data);
+      equal(seen.join(","), "one,two", "events across reconnects");
+      equal(mock.calls[1].headers["last-event-id"], "a1", "Last-Event-ID on the first reconnect");
+      equal(mock.calls[2].headers["last-event-id"], "a2", "Last-Event-ID on the second reconnect");
     },
 
     async "downloadResumable resumes after a dropped connection"() {
