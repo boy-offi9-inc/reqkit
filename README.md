@@ -49,18 +49,13 @@ const pages = await limit.map(urls, (url) =>
 );
 ```
 
-> **New in 0.5.0:** an [interactive playground](#playground) (try every feature in your browser, no install), a dependency-free **ESM bundle** for browsers / Deno / Bun / Workers (`@boy-offi9-inc/reqkit/browser`), [recipes](./RECIPES.md) for axios, ky, got and undici, and multi-runtime CI. See the [CHANGELOG](./CHANGELOG.md).
->
-> **0.4.0:** proactive rate limiter, circuit breaker, response cache (TTL + stale-while-revalidate + ETag), resumable downloads, SSE/NDJSON stream readers and a mock-fetch test helper.
-
 ---
 
 ## Playground
 
 Try everything in your browser — retries obeying `Retry-After`, rate limiting, the circuit breaker, caching, SSE streaming, an SSE stream that reconnects itself, and a resumable download that survives a dropped connection. It runs against a fake in-memory server, so there's nothing to install and no network involved.
 
-Run it locally: `npm run build && python3 -m http.server -d docs` → open `http://localhost:8000`. (ES modules don't load from `file://`, so it needs a server.) The repo's `pages.yml` workflow publishes the same folder to GitHub Pages — enable it once under Settings → Pages → Source: "GitHub Actions".
-
+Run it locally: `npm run build && python3 -m http.server -d docs` → open `http://localhost:8000`. (ES modules don't load from `file://`, so it needs a server.)
 ## Works with what you already use
 
 Recipes for **axios, ky, got, undici/node-fetch**, testing, and LLM streaming live in [RECIPES.md](./RECIPES.md): keep your client, bolt on just the piece you're missing (`Retry-After`-aware retries, a rate limiter, a circuit breaker).
