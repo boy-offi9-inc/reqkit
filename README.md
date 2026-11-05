@@ -48,14 +48,13 @@ const pages = await limit.map(urls, (url) =>
   )
 );
 ```
-
----
+__
 
 ## Playground
 
 Try everything in your browser — retries obeying `Retry-After`, rate limiting, the circuit breaker, caching, SSE streaming, an SSE stream that reconnects itself, and a resumable download that survives a dropped connection. It runs against a fake in-memory server, so there's nothing to install and no network involved.
 
-Run it locally: `npm run build && python3 -m http.server -d docs` → open `http://localhost:8000`. (ES modules don't load from `file://`, so it needs a server.)
+Run it locally: `npm run build && python3 -m http.server -d docs` → open `http://localhost:8000`. (ES modules don't load from `file://`, so it needs a server.) The repo's `pages.yml` workflow publishes the same folder to GitHub Pages — enable it once under Settings → Pages → Source: "GitHub Actions".
 
 ## Works with what you already use
 
@@ -75,6 +74,18 @@ Recipes for **axios, ky, got, undici/node-fetch**, testing, and LLM streaming li
 ```
 
 ---
+
+## Security
+
+reqkit handles data a server controls (headers, streams, redirects), so the defaults are conservative:
+
+- **Credentials stay home.** With a `baseUrl`, the default `auth` token and default `Authorization` / `Proxy-Authorization` / `Cookie` / `X-API-Key` / `X-Auth-Token` headers are only sent to that origin (plus `trustedOrigins`). Pass an absolute URL to another host and those headers are dropped — the classic "absolute URL leaks the token" bug (the one axios had) can't happen. Headers you pass *for a specific call* are deliberate and always sent. (With neither `baseUrl` nor `trustedOrigins` there's nothing to compare against, so set at least one.)
+- **A server can't steer pagination.** `paginateLinks` refuses a `Link: rel="next"` that points at another origin (`code: "PAGINATE_CROSS_ORIGIN"`) — otherwise a hostile API could send your requests, and any credentials you pass in `init`, to a third party. Allow extra origins with `origins: [...]`.
+- **Streams are bounded.** `readLines` / `readNDJSON` / `readSSE` run in linear time and throw `code: "LINE_TOO_LONG"` past `maxLineLength` (default 16 Mi characters) instead of buffering a never-ending line forever; `withProgress` and `downloadResumable` have `maxBytes`.
+- **Hostile headers are cheap.** `parseLinkHeader` is linear-time and ignores headers over 64 KB.
+- **Safe retries.** `createFetch` only retries idempotent methods (or requests with an `Idempotency-Key`), and a cross-origin redirect is left to `fetch`, which strips `Authorization` itself.
+
+What reqkit does **not** do: it doesn't block requests to private/internal addresses (SSRF protection for server-side use needs DNS-level control). If you fetch user-supplied URLs on a server, validate them first.
 
 ## Pick what you need
 
@@ -362,6 +373,8 @@ for await (const row of readNDJSON(response)) console.log(row); // newline-delim
 for await (const line of readLines(response)) console.log(line);
 ```
 
+All three take `{ signal, maxLineLength }` — a line (or one SSE event's data) longer than `maxLineLength` characters (default 16 Mi) throws `code: "LINE_TOO_LONG"` rather than buffering forever.
+
 `readSSE` follows the spec: multi-line `data:` is joined with `\n`, comments are ignored, `event` defaults to `"message"`, `id` carries over, `retry` is parsed, and an event cut off by the end of the stream is dropped. `readNDJSON` skips blank lines and names the bad line on a parse error (or pass `skipInvalid: true`). Line splitting handles `\n`, `\r\n`, `\r`, a BOM, and multi-byte characters split across chunks.
 
 ### Pagination: `paginate`, `paginatePages`, `paginateLinks`
@@ -502,6 +515,7 @@ const admin = api.extend({ headers: { "x-role": "admin" } }); // merges over the
 | `retry` | see below | `false` disables; otherwise `{ retries, statusCodes, methods, baseDelayMs, maxDelayMs, factor, jitter, maxRetryTime, shouldRetry, calculateDelay, onRetry }` |
 | `rateLimit` | — | `true` just learns from `X-RateLimit-*` / `Retry-After`; `{ requests, perMs }` also enforces a budget; or pass a shared [`createRateLimiter`](#createratelimiteropts) |
 | `circuitBreaker` | — | `true` / options → one breaker **per origin**; or pass a shared [`createCircuitBreaker`](#createcircuitbreakeropts), or `(url) => breaker`. An open circuit stops retries immediately. |
+| `trustedOrigins` | — | extra origins that may receive the default credentials — see [Security](#security) |
 | `auth` | — | attach a token and refresh it on 401 — see [Auth token refresh](#auth-token-refresh) |
 | `cache` | — | in-memory GET cache — see [Caching](#caching). `true` = 60s TTL. Per request: `cache: false` bypasses, `"reload"` refreshes |
 | `dedupe` | `false` | merge identical concurrent `GET`/`HEAD` calls; every caller gets its own readable clone. Requests with their own `signal` are never merged. |

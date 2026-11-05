@@ -1,6 +1,6 @@
 {
   "name": "@boy-offi9-inc/reqkit",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Small, composable HTTP helpers — retry with backoff and Retry-After, timeouts, normalized errors, rate limiter, circuit breaker, response cache, resumable downloads, SSE/NDJSON streams, mock fetch, and an opt-in createFetch. Not a client; works alongside fetch/axios/anything.",
   "main": "./src/index.js",
   "types": "./types/index.d.ts",

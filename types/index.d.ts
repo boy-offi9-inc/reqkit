@@ -210,6 +210,13 @@ export interface CreateFetchDefaults {
   rateLimit?: boolean | RateLimiterOptions | RateLimiter;
   /** Options for a per-origin breaker, a shared breaker instance, or `(url) => breaker`. */
   circuitBreaker?: boolean | CircuitBreakerOptions | CircuitBreaker | ((url: string) => CircuitBreaker);
+  /**
+   * Extra origins ("https://cdn.example.com") that may receive the default credentials
+   * (`auth` and default Authorization/Cookie/X-API-Key headers), besides `baseUrl`'s.
+   * Absolute URLs to any other origin don't get them. With neither `baseUrl` nor
+   * `trustedOrigins` there's nothing to compare against and credentials go everywhere.
+   */
+  trustedOrigins?: string[];
   /** Attach a token and, on a 401, refresh it once (shared by all concurrent requests) and replay. */
   auth?: AuthOptions;
   /** In-memory GET cache with TTL, stale-while-revalidate and ETag/Last-Modified revalidation. `true` = 60s TTL. */
@@ -237,6 +244,8 @@ export interface ReqkitRequestInit extends Omit<RequestInit, "headers" | "cache"
 
 export interface ReqkitFetch {
   (input: string, init?: ReqkitRequestInit): Promise<Response>;
+  /** The `baseUrl` this instance was created with. */
+  readonly baseUrl: string | undefined;
   /** Resolves to the parsed JSON body (null for an empty body). */
   json<T = unknown>(input: string, init?: ReqkitRequestInit): Promise<T>;
   /** New instance with these defaults merged over the current ones. */
@@ -392,6 +401,12 @@ export type StreamSource = Response | ReadableStream<Uint8Array> | AsyncIterable
 
 export interface StreamOptions {
   signal?: AbortSignal;
+  /**
+   * Longest line (or, for readSSE, one event's data) in characters before throwing
+   * `code: "LINE_TOO_LONG"` — protects against a server that never sends a newline.
+   * Default 16 Mi (16 * 1024 * 1024); pass Infinity to disable.
+   */
+  maxLineLength?: number;
 }
 
 export interface SSEEvent {
@@ -505,6 +520,11 @@ export interface PaginateLinksOptions<T = any> {
   signal?: AbortSignal;
   /** Extra options passed to every request. */
   init?: Record<string, any>;
+  /**
+   * Origins a `Link` may point to. Default: the origin of `url` (or of the createFetch
+   * instance's `baseUrl`). Any other origin throws `code: "PAGINATE_CROSS_ORIGIN"`.
+   */
+  origins?: string[];
 }
 
 /** Follows `Link: <...>; rel="next"` headers and yields the items of every page. */

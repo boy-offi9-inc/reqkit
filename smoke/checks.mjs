@@ -179,6 +179,34 @@ export function makeChecks(r) {
       equal(got.join(","), "1,2", "paginateLinks items");
     },
 
+    async "credentials are not sent to another origin"() {
+      const mock = r.createMockFetch();
+      mock.get("*").reply(200, "ok");
+      const api = r.createFetch({
+        fetch: mock.fetch,
+        baseUrl: "https://api.test",
+        headers: { authorization: "Bearer D", "x-client": "c" },
+        auth: { getToken: () => "T", refresh() {} },
+        retry: false,
+      });
+      await api("/mine");
+      await api("https://elsewhere.test/x");
+      equal(mock.calls[0].headers.authorization, "Bearer D", "home origin gets the default header");
+      equal(mock.calls[1].headers.authorization, undefined, "other origin does not");
+      equal(mock.calls[1].headers["x-client"], "c", "harmless headers still go");
+    },
+
+    async "readLines refuses a never-ending line"() {
+      const endless = new ReadableStream({ pull: (c) => c.enqueue(new Uint8Array(65536).fill(97)) });
+      let code;
+      try {
+        for await (const line of r.readLines(endless, { maxLineLength: 1 << 20 })) void line;
+      } catch (e) {
+        code = e.code;
+      }
+      equal(code, "LINE_TOO_LONG", "error code");
+    },
+
     async "downloadResumable resumes after a dropped connection"() {
       const FILE = new Uint8Array(3000).map((_, i) => i % 251);
       let call = 0;

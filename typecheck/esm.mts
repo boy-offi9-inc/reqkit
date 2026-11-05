@@ -178,3 +178,12 @@ export async function checkAuthAndPagination(signal: AbortSignal) {
   const links: Record<string, string> = parseLinkHeader('<a>; rel="next"', "https://x.test");
   return [users, repos, links, withAuth];
 }
+
+export async function checkSecurityOptions() {
+  const api = createFetch({ baseUrl: "https://api.x.test", trustedOrigins: ["https://cdn.x.test"] });
+  const base: string | undefined = api.baseUrl;
+  for await (const line of readLines(new Response("x"), { maxLineLength: 1024 })) void line;
+  for await (const ev of readSSE(new Response("x"), { maxLineLength: Infinity })) void ev;
+  for await (const r of paginateLinks(api, "/x", { origins: ["https://api.x.test"] })) void r;
+  return base;
+}
