@@ -243,3 +243,21 @@ test("paginateLinks explains when it can't find the items", async () => {
     await srv.close();
   }
 });
+
+// ---- parseLinkHeader on hostile input ----------------------------------------------
+
+test("parseLinkHeader stays fast on adversarial headers and ignores absurdly long ones", () => {
+  const nasty = [
+    "<".repeat(60000),
+    "<a>" + ";a".repeat(20000) + '"',
+    "<a>" + ';a="'.repeat(10000),
+    "<a>;a=" + "b".repeat(50000) + ";".repeat(5000),
+    "<a>; " + " ".repeat(40000) + "x",
+  ];
+  const started = Date.now();
+  for (const header of nasty) parseLinkHeader(header);
+  assert.ok(Date.now() - started < 500, `took ${Date.now() - started}ms`);
+
+  assert.deepEqual(parseLinkHeader('<https://x/next>; rel="next"' + " ".repeat(70000)), {}, "over the 64 KB cap");
+  assert.equal(parseLinkHeader('<https://x/next>; rel="next"').next, "https://x/next", "normal input still works");
+});

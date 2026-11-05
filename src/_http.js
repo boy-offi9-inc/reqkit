@@ -87,4 +87,14 @@ async function discardBody(response) {
   }
 }
 
-module.exports = { parseRetryAfter, parseResetMs, getWaitMsFromHeaders, getRateLimitInfo, discardBody };
+/** The origin ("https://host:port") of an absolute URL, or null if `url` is relative/invalid. */
+function getOrigin(url) {
+  try {
+    const { origin } = new URL(String(url));
+    return origin === "null" ? null : origin;
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { parseRetryAfter, parseResetMs, getWaitMsFromHeaders, getRateLimitInfo, discardBody, getOrigin };

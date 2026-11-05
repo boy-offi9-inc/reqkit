@@ -1,4 +1,7 @@
 const { HTTPError } = require("./HTTPError");
+const { getOrigin } = require("./_http");
+
+const MAX_LINK_HEADER_LENGTH = 64 * 1024;
 
 /**
  * Parses an RFC 8288 `Link` header (GitHub, GitLab, WordPress... use it for
@@ -10,7 +13,8 @@ const { HTTPError } = require("./HTTPError");
  * ```
  *
  * A link with several rels (`rel="next last"`) is listed under each; the first
- * link wins when a rel appears twice. Commas inside `<...>` are handled.
+ * link wins when a rel appears twice. Commas inside `<...>` are handled. Input
+ * is treated as untrusted: headers over 64 KB are ignored and parsing is linear-time.
  *
  * @param {string | null | undefined} header
  * @param {string} [base]
@@ -18,10 +22,11 @@ const { HTTPError } = require("./HTTPError");
  */
 function parseLinkHeader(header, base) {
   const links = {};
-  if (!header) return links;
+  // Link headers are server-controlled; real ones are a few hundred bytes (HTTP stacks cap headers at ~16 KB).
+  if (!header || header.length > MAX_LINK_HEADER_LENGTH) return links;
 
   // <url> followed by any number of `; name` / `; name=token` / `; name="quoted, value"` params
-  const linkRe = /<([^>]*)>((?:\s*;\s*[^=;,<\s]+(?:\s*=\s*(?:"[^"]*"|[^;,<\s]*))?)*)/g;
+  const linkRe = /<([^<>]*)>((?:\s*;\s*[^=;,<\s]+(?:\s*=\s*(?:"[^"]*"|[^;,<\s]*))?)*)/g;
   let match;
   while ((match = linkRe.exec(header)) !== null) {
     const rel = /;\s*rel\s*=\s*(?:"([^"]*)"|([^\s;,]+))/i.exec(match[2]);
@@ -148,15 +153,39 @@ function defaultGetItems(data) {
  * @param {number} [opts.maxItems=Infinity]
  * @param {AbortSignal} [opts.signal]
  * @param {object} [opts.init] - extra options passed to every `request`
+ * @param {string[]} [opts.origins] - origins a `Link` may point to. Default: the origin of `url`
+ *   (or of the `createFetch` instance's `baseUrl`). A `Link` to anywhere else throws
+ *   `code: "PAGINATE_CROSS_ORIGIN"` — a server could otherwise steer your requests (and any
+ *   credentials in `init`) to a third party. The check is skipped only when no origin can be determined.
  */
 async function* paginateLinks(request, url, opts = {}) {
   const { getItems = defaultGetItems, init = {}, signal } = opts;
+
+  const allowed = new Set();
+  if (opts.origins) {
+    for (const o of opts.origins) {
+      const origin = getOrigin(o);
+      if (origin) allowed.add(origin);
+    }
+  } else {
+    const origin = getOrigin(url) || getOrigin(request && request.baseUrl) || getOrigin(globalThis.location && globalThis.location.href);
+    if (origin) allowed.add(origin);
+  }
 
   async function fetchPage(pageUrl) {
     const res = await request(pageUrl, { ...init, signal });
     if (!res.ok) throw new HTTPError(res, { method: init.method || "GET", url: pageUrl });
     const items = getItems(await res.json(), res);
     const next = parseLinkHeader(res.headers.get("link"), pageUrl).next;
+    if (next && allowed.size > 0) {
+      const nextOrigin = getOrigin(next);
+      if (nextOrigin !== null && !allowed.has(nextOrigin)) {
+        throw Object.assign(
+          new Error(`paginateLinks: refusing to follow a Link to another origin (${nextOrigin}). Pass { origins: [...] } if that's intended.`),
+          { code: "PAGINATE_CROSS_ORIGIN" }
+        );
+      }
+    }
     return { items, next };
   }
 
