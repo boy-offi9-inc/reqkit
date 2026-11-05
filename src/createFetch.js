@@ -9,11 +9,13 @@ const { createRateLimiter } = require("./createRateLimiter");
 const { createCircuitBreaker } = require("./createCircuitBreaker");
 const { createMemoryCache } = require("./createMemoryCache");
 const { cacheKey, snapshotResponse, entryToResponse } = require("./_cache");
-const { discardBody } = require("./_http");
+const { discardBody, getOrigin } = require("./_http");
 
 const DEFAULT_RETRY_STATUS_CODES = [408, 425, 429, 500, 502, 503, 504];
 // Safe to repeat without side effects. POST/PATCH are deliberately absent.
 const DEFAULT_RETRY_METHODS = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"];
+// Default headers that carry credentials. They're only sent to trusted origins.
+const SENSITIVE_HEADERS = ["authorization", "proxy-authorization", "cookie", "x-api-key", "x-auth-token"];
 
 function isAbsoluteUrl(url) {
   return /^[a-z][a-z0-9+.-]*:/i.test(url);
@@ -47,11 +49,7 @@ function isStreamBody(body) {
 }
 
 function originOf(url) {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return url;
-  }
+  return getOrigin(url) || url;
 }
 
 // One in-flight token refresh per `auth` config object, so concurrent 401s —
@@ -101,6 +99,9 @@ function mergeDefaults(base, extra) {
  *  - concurrent GET de-duplication (withDedupe)
  *  - `auth`: attach a token, and on a 401 refresh it ONCE (shared by all
  *    concurrent requests) and replay the request
+ *  - credential safety: default credentials (`auth`, and default headers like
+ *    Authorization/Cookie/X-API-Key) are only sent to `baseUrl`'s origin and
+ *    `trustedOrigins` — pass an absolute URL to another host and they stay home
  *  - `HTTPError` on non-2xx (turn off with `throwHttpErrors: false`)
  *  - `onRequest` / `onResponse` hooks
  *
@@ -123,6 +124,9 @@ function mergeDefaults(base, extra) {
  *   whatever `shouldRefresh(response)` says) `refresh({ token, response })` is
  *   called once for all concurrent callers and the request is replayed with the
  *   new token. `header` defaults to "authorization", `scheme` to "Bearer" ("" for none).
+ * @param {string[]} [defaults.trustedOrigins] - extra origins ("https://cdn.example.com") that may
+ *   receive the default credentials, besides `baseUrl`'s. With neither `baseUrl` nor
+ *   `trustedOrigins` set there is nothing to compare against and credentials go everywhere.
  * @param {boolean} [defaults.dedupe=false] - merge identical concurrent GET/HEAD calls
  * @param {boolean} [defaults.throwHttpErrors=true]
  * @param {typeof fetch} [defaults.fetch=globalThis.fetch]
@@ -140,6 +144,7 @@ function createFetch(defaults = {}) {
     circuitBreaker,
     cache,
     auth,
+    trustedOrigins,
     dedupe = false,
     throwHttpErrors: defaultThrow = true,
     fetch: customFetch,
@@ -148,6 +153,18 @@ function createFetch(defaults = {}) {
   } = defaults;
 
   const doFetch = (...args) => (customFetch || globalThis.fetch)(...args);
+
+  // Origins allowed to receive default credentials. Empty = no baseUrl to compare against = unrestricted.
+  const trusted = new Set();
+  for (const o of [baseUrl, ...(trustedOrigins || [])]) {
+    const origin = o && getOrigin(o);
+    if (origin) trusted.add(origin);
+  }
+  const isTrustedTarget = (url) => {
+    if (trusted.size === 0 || !isAbsoluteUrl(url)) return true; // relative URLs resolve against our own base
+    const origin = getOrigin(url);
+    return origin !== null && trusted.has(origin);
+  };
 
   // --- stateful pieces, built once so `extend()` children share them -------
   const limiter = !rateLimit
@@ -245,7 +262,18 @@ function createFetch(defaults = {}) {
     } = init;
 
     const method = String(fetchInit.method || "GET").toUpperCase();
-    const headers = mergeHeaders(await resolveHeaders(defaultHeaders), new Headers(initHeaders || undefined));
+    const url = joinUrl(baseUrl, input, query);
+    const credentialsAllowed = isTrustedTarget(url);
+
+    const defaultHeaderSet = await resolveHeaders(defaultHeaders);
+    if (!credentialsAllowed) {
+      // An absolute URL to some other host: don't hand it our default credentials.
+      for (const name of [...SENSITIVE_HEADERS, ...(auth && auth.header ? [String(auth.header).toLowerCase()] : [])]) {
+        defaultHeaderSet.delete(name);
+      }
+    }
+    // Headers the caller passes for *this* call are deliberate, so they always go through.
+    const headers = mergeHeaders(defaultHeaderSet, new Headers(initHeaders || undefined));
 
     let body = fetchInit.body;
     if (json !== undefined) {
@@ -253,7 +281,7 @@ function createFetch(defaults = {}) {
       if (!headers.has("content-type")) headers.set("content-type", "application/json");
     }
 
-    const ctx = { url: joinUrl(baseUrl, input, query), init: { ...fetchInit, method, headers, body } };
+    const ctx = { url, init: { ...fetchInit, method, headers, body } };
     if (onRequest) await onRequest(ctx);
     const finalHeaders = ctx.init.headers instanceof Headers ? ctx.init.headers : new Headers(ctx.init.headers);
     const finalMethod = String(ctx.init.method || method).toUpperCase();
@@ -262,7 +290,7 @@ function createFetch(defaults = {}) {
     const authHeader = auth ? String(auth.header || "authorization").toLowerCase() : null;
     const formatToken = (token) => (auth.scheme === "" ? String(token) : `${auth.scheme === undefined ? "Bearer" : auth.scheme} ${token}`);
     let usedToken = null;
-    if (auth && !finalHeaders.has(authHeader)) {
+    if (auth && credentialsAllowed && !finalHeaders.has(authHeader)) {
       usedToken = (await auth.getToken()) || null;
       if (usedToken) finalHeaders.set(authHeader, formatToken(usedToken));
     }
@@ -436,6 +464,9 @@ function createFetch(defaults = {}) {
 
     return finish(response);
   }
+
+  /** The `baseUrl` this instance was created with (paginateLinks uses it to stay on-origin). */
+  request.baseUrl = baseUrl;
 
   /** Like `request`, but resolves to the parsed JSON body (null for an empty body). */
   request.json = async (input, init) => {
