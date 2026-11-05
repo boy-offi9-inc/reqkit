@@ -34,46 +34,83 @@ async function* chunks(source, signal) {
   }
 }
 
+const DEFAULT_MAX_LINE_LENGTH = 16 * 1024 * 1024;
+
+function lineTooLong(limit) {
+  return Object.assign(
+    new Error(`reqkit streams: a line exceeded ${limit} characters without a line break (raise \`maxLineLength\` if that's expected)`),
+    { code: "LINE_TOO_LONG" }
+  );
+}
+
 /**
  * Async-iterates the text lines of a streamed body. Handles \n, \r\n and \r,
  * multi-byte characters split across chunks, and a leading BOM.
+ *
+ * Runs in linear time and bounded memory: only newly arrived text is scanned,
+ * and a "line" longer than `maxLineLength` characters (default 16 Mi — a
+ * server that never sends a newline) throws `code: "LINE_TOO_LONG"` instead
+ * of buffering forever.
  *
  * ```js
  * for await (const line of readLines(response)) console.log(line);
  * ```
  *
  * @param {Response | ReadableStream | AsyncIterable<Uint8Array>} source
- * @param {{ signal?: AbortSignal }} [opts]
+ * @param {{ signal?: AbortSignal, maxLineLength?: number }} [opts]
  * @returns {AsyncGenerator<string>}
  */
 async function* readLines(source, opts = {}) {
+  const { maxLineLength = DEFAULT_MAX_LINE_LENGTH } = opts;
   const decoder = new TextDecoder("utf-8");
-  let buffer = "";
+  const terminator = /[\r\n]/g;
+
+  let parts = []; // pieces of the line being assembled (no terminators in them)
+  let partsLength = 0;
+  let skipLF = false; // the previous line ended with "\r", so a leading "\n" belongs to it
   let first = true;
 
   for await (const chunk of chunks(source, opts.signal)) {
-    buffer += decoder.decode(chunk, { stream: true });
-    if (first && buffer.length > 0) {
-      buffer = buffer.replace(/^\uFEFF/, "");
+    let text = decoder.decode(chunk, { stream: true });
+    if (first && text.length > 0) {
+      text = text.replace(/^\uFEFF/, "");
       first = false;
     }
 
-    let pos = 0;
-    for (;;) {
-      const rest = buffer.slice(pos);
-      const i = rest.search(/\r\n|\n|\r/);
-      if (i === -1) break;
-      // A trailing "\r" might be the first half of "\r\n" — wait for more data.
-      if (rest[i] === "\r" && i === rest.length - 1) break;
-      yield rest.slice(0, i);
-      pos += i + (rest.startsWith("\r\n", i) ? 2 : 1);
+    let start = 0;
+    terminator.lastIndex = 0;
+    let match;
+    while ((match = terminator.exec(text)) !== null) {
+      const ch = match[0];
+      if (ch === "\n" && skipLF && match.index === start) {
+        skipLF = false; // the "\n" of a "\r\n" pair — swallow it
+        start = match.index + 1;
+        continue;
+      }
+      skipLF = false;
+
+      const piece = text.slice(start, match.index);
+      if (partsLength + piece.length > maxLineLength) throw lineTooLong(maxLineLength);
+      const line = parts.length > 0 ? parts.join("") + piece : piece;
+      parts = [];
+      partsLength = 0;
+      yield line;
+
+      start = match.index + 1;
+      skipLF = ch === "\r";
     }
-    buffer = buffer.slice(pos);
+
+    if (start < text.length) {
+      const rest = text.slice(start);
+      partsLength += rest.length;
+      if (partsLength > maxLineLength) throw lineTooLong(maxLineLength);
+      parts.push(rest);
+      skipLF = false;
+    }
   }
 
-  buffer += decoder.decode();
-  if (buffer.endsWith("\r")) buffer = buffer.slice(0, -1);
-  if (buffer.length > 0) yield buffer;
+  const tail = parts.join("") + decoder.decode();
+  if (tail.length > 0) yield tail;
 }
 
 /**
@@ -113,11 +150,13 @@ async function* readNDJSON(source, opts = {}) {
  * ```
  *
  * @param {Response | ReadableStream | AsyncIterable<Uint8Array>} source
- * @param {{ signal?: AbortSignal }} [opts]
+ * @param {{ signal?: AbortSignal, maxLineLength?: number }} [opts] - `maxLineLength` also caps the data of a single event
  */
 async function* readSSE(source, opts = {}) {
+  const maxEventLength = opts.maxLineLength ?? DEFAULT_MAX_LINE_LENGTH;
   let event = "";
   let data = [];
+  let dataLength = 0;
   let retry;
   let lastId = "";
 
@@ -126,6 +165,7 @@ async function* readSSE(source, opts = {}) {
       if (data.length > 0) yield { event: event || "message", data: data.join("\n"), id: lastId, retry };
       event = "";
       data = [];
+      dataLength = 0;
       retry = undefined;
       continue;
     }
@@ -137,7 +177,11 @@ async function* readSSE(source, opts = {}) {
     if (value.startsWith(" ")) value = value.slice(1);
 
     if (field === "event") event = value;
-    else if (field === "data") data.push(value);
+    else if (field === "data") {
+      dataLength += value.length + 1;
+      if (dataLength > maxEventLength) throw lineTooLong(maxEventLength);
+      data.push(value);
+    }
     else if (field === "id") {
       if (!value.includes("\0")) lastId = value;
     } else if (field === "retry") {

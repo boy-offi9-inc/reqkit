@@ -119,3 +119,64 @@ test("readSSE works on an LLM-style token stream", async () => {
   }
   assert.equal(tokens.join(""), "Hello");
 });
+
+// ---- robustness: linear time, bounded memory, CR/LF edge cases ------------------
+
+test("readLines: CRLF split exactly across chunks yields one line break, not two", async () => {
+  assert.deepEqual(await collect(readLines(streamOf(["a\r", "\nb\r\n", "c"]))), ["a", "b", "c"]);
+  assert.deepEqual(await collect(readLines(streamOf(["a\r", "b"]))), ["a", "b"]);
+  assert.deepEqual(await collect(readLines(streamOf(["a\r\r\n\nb"]))), ["a", "", "", "b"]);
+  assert.deepEqual(await collect(readLines(streamOf(["\n\n"]))), ["", ""]);
+});
+
+test("readLines: a line split over many chunks is reassembled", async () => {
+  const parts = Array.from({ length: 200 }, (_, i) => `p${i}-`);
+  const lines = await collect(readLines(streamOf([...parts, "\nnext\n"])));
+  assert.deepEqual(lines, [parts.join(""), "next"]);
+});
+
+test("readLines: a server that never sends a newline hits maxLineLength instead of buffering forever", async () => {
+  let sent = 0;
+  const endless = new ReadableStream({
+    pull(controller) {
+      sent++;
+      controller.enqueue(new Uint8Array(1024 * 1024).fill(97)); // 1 MiB of "a", forever
+    },
+  });
+  const started = Date.now();
+  await assert.rejects(collect(readLines(endless, { maxLineLength: 4 * 1024 * 1024 })), (e) => e.code === "LINE_TOO_LONG");
+  assert.ok(sent <= 6, `stopped after ~${sent} MiB`);
+  assert.ok(Date.now() - started < 2000, "and quickly");
+});
+
+test("readLines: linear time — 64 MB in 4 KB chunks with no newline finishes fast (the old scan was quadratic)", async () => {
+  const chunk = new Uint8Array(4096).fill(98);
+  let n = 0;
+  const stream = new ReadableStream({
+    pull(c) {
+      if (n++ >= 16 * 1024) return c.close();
+      c.enqueue(chunk);
+    },
+  });
+  const started = Date.now();
+  const lines = await collect(readLines(stream, { maxLineLength: Infinity }));
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].length, 64 * 1024 * 1024);
+  assert.ok(Date.now() - started < 8000, `took ${Date.now() - started}ms`);
+});
+
+test("readLines: very many short lines in one chunk are fast", async () => {
+  const text = Array.from({ length: 200000 }, (_, i) => `l${i}`).join("\n");
+  const started = Date.now();
+  const lines = await collect(readLines(new Response(text)));
+  assert.equal(lines.length, 200000);
+  assert.ok(Date.now() - started < 3000);
+});
+
+test("readNDJSON and readSSE accept maxLineLength; readSSE also caps one event's data", async () => {
+  await assert.rejects(collect(readNDJSON(streamOf(['{"a":"' + "x".repeat(100) + '"}\n']), { maxLineLength: 50 })), (e) => e.code === "LINE_TOO_LONG");
+  await assert.rejects(collect(readSSE(streamOf(["data: " + "x".repeat(100) + "\n\n"]), { maxLineLength: 50 })), (e) => e.code === "LINE_TOO_LONG");
+  // many small data lines that add up past the cap
+  const many = Array.from({ length: 50 }, () => "data: 0123456789\n").join("") + "\n";
+  await assert.rejects(collect(readSSE(streamOf([many]), { maxLineLength: 200 })), (e) => e.code === "LINE_TOO_LONG");
+});
