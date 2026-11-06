@@ -9,7 +9,6 @@
   <a href="https://github.com/boy-offi9-inc/reqkit/actions/workflows/ci.yml"><img src="https://github.com/boy-offi9-inc/reqkit/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node >=18">
-  <img src="https://img.shields.io/badge/npm-%40boy--offi9--inc%2Freqkit-CB3837?logo=npm&logoColor=white" alt="npm package">
   <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Zero dependencies">
   <img src="https://img.shields.io/badge/module-CJS%20%2B%20ESM-blue" alt="CJS + ESM">
   <img src="https://img.shields.io/badge/types-included-3178C6?logo=typescript&logoColor=white" alt="TypeScript types included">
@@ -19,7 +18,7 @@
 
 **Tiny, zero-dependency HTTP helpers for `fetch`, axios, or anything else — retries that respect `Retry-After`, timeouts that really cancel, and errors that make sense.**
 
-Not a client, not an axios replacement. Pull in the one function you need, or let [`createFetch`](#createfetchdefaults) wire them together for you — you always get a plain `Response` back.
+Not a client, not an axios replacement. Use one function on its own, or let [`createFetch`](#createfetchdefaults) wire them together. You always get a plain `Response` back.
 
 ```js
 import { createFetch } from "@boy-offi9-inc/reqkit";
@@ -48,44 +47,19 @@ const pages = await limit.map(urls, (url) =>
   )
 );
 ```
-__
 
-## Playground
+## Install
 
-Try everything in your browser — retries obeying `Retry-After`, rate limiting, the circuit breaker, caching, SSE streaming, an SSE stream that reconnects itself, and a resumable download that survives a dropped connection. It runs against a fake in-memory server, so there's nothing to install and no network involved.
-
-Run it locally: `npm run build && python3 -m http.server -d docs` → open `http://localhost:8000`. (ES modules don't load from `file://`, so it needs a server.) The repo's `pages.yml` workflow publishes the same folder to GitHub Pages — enable it once under Settings → Pages → Source: "GitHub Actions".
-
-## Works with what you already use
-
-Recipes for **axios, ky, got, undici/node-fetch**, testing, and LLM streaming live in [RECIPES.md](./RECIPES.md): keep your client, bolt on just the piece you're missing (`Retry-After`-aware retries, a rate limiter, a circuit breaker).
-
-## Runtime support
-
-| Runtime | Status |
-|---|---|
-| **Node 18, 20, 22, 24** | Primary target. Full test suite runs in CI on all four. |
-| **Deno, Bun, browsers, Cloudflare Workers** | Use the dependency-free ESM bundle (`@boy-offi9-inc/reqkit/browser`, or `import … from "npm:@boy-offi9-inc/reqkit"` in Deno). Only web-standard APIs are used. CI smoke-tests the bundle on Deno, Bun and headless Chromium — **experimental** until those jobs have a track record; please open an issue if one misbehaves. |
-
-```html
-<script type="module">
-  import { createFetch } from "https://cdn.jsdelivr.net/npm/@boy-offi9-inc/reqkit@0.5.0/dist/reqkit.mjs";
-</script>
+```bash
+npm install @boy-offi9-inc/reqkit
 ```
 
----
+```js
+import { createFetch, withRetry } from "@boy-offi9-inc/reqkit";      // ESM
+const { createFetch, withRetry } = require("@boy-offi9-inc/reqkit");  // CommonJS
+```
 
-## Security
-
-reqkit handles data a server controls (headers, streams, redirects), so the defaults are conservative:
-
-- **Credentials stay home.** With a `baseUrl`, the default `auth` token and default `Authorization` / `Proxy-Authorization` / `Cookie` / `X-API-Key` / `X-Auth-Token` headers are only sent to that origin (plus `trustedOrigins`). Pass an absolute URL to another host and those headers are dropped — the classic "absolute URL leaks the token" bug (the one axios had) can't happen. Headers you pass *for a specific call* are deliberate and always sent. (With neither `baseUrl` nor `trustedOrigins` there's nothing to compare against, so set at least one.)
-- **A server can't steer pagination.** `paginateLinks` refuses a `Link: rel="next"` that points at another origin (`code: "PAGINATE_CROSS_ORIGIN"`) — otherwise a hostile API could send your requests, and any credentials you pass in `init`, to a third party. Allow extra origins with `origins: [...]`.
-- **Streams are bounded.** `readLines` / `readNDJSON` / `readSSE` run in linear time and throw `code: "LINE_TOO_LONG"` past `maxLineLength` (default 16 Mi characters) instead of buffering a never-ending line forever; `withProgress` and `downloadResumable` have `maxBytes`.
-- **Hostile headers are cheap.** `parseLinkHeader` is linear-time and ignores headers over 64 KB.
-- **Safe retries.** `createFetch` only retries idempotent methods (or requests with an `Idempotency-Key`), and a cross-origin redirect is left to `fetch`, which strips `Authorization` itself.
-
-What reqkit does **not** do: it doesn't block requests to private/internal addresses (SSRF protection for server-side use needs DNS-level control). If you fetch user-supplied URLs on a server, validate them first.
+Requires Node 18+. TypeScript types are included.
 
 ## Pick what you need
 
@@ -110,26 +84,48 @@ What reqkit does **not** do: it doesn't block requests to private/internal addre
 | Test retry/timeout code without a network | [`createMockFetch`](#createmockfetch) |
 | All of the above, wired up | [`createFetch`](#createfetchdefaults) |
 
----
+## Why reqkit
 
-## Why this exists
+- **No client to adopt.** Standalone functions that compose with whatever you already use — fetch, axios, ky, got, undici.
+- **It reads the server.** Retries wait for `Retry-After` / `X-RateLimit-Reset` instead of backing off blindly, and a rate limiter can slow down *before* the server says 429.
+- **Safe by default.** Retries only touch idempotent methods, credentials never leave your origin, and parsers bound their memory and time on hostile input.
+- **Errors that make sense.** Node's `TypeError: fetch failed`, the browser's `Failed to fetch`, axios and undici errors all normalize to one shape, and a deliberate abort is never reported as a timeout.
+- **Zero dependencies**, CommonJS and ESM, hand-written TypeScript types.
 
-Most HTTP retry/timeout wrappers bundle everything into a client you have to fully adopt. This is the opposite: standalone functions that compose with whatever you're already using. Zero dependencies, CJS + ESM, TypeScript types included.
+## Runtime support
 
-**Honest note:** retries, timeouts and error normalization are a well-covered problem — there are other solid packages doing similar things (`fetchy`, `fetchpilot`, `p-retry`, to name a few). What reqkit leans on:
+| Runtime | |
+|---|---|
+| **Node 18, 20, 22, 24** | Supported. |
+| **Deno, Bun, Cloudflare Workers, browsers** | Use the dependency-free ESM bundle, `@boy-offi9-inc/reqkit/browser`. Only web-standard APIs are used. |
 
-- **It reads the server.** Retries wait for `Retry-After` / `X-RateLimit-Reset` instead of blind backoff on 429s — most retry libraries treat rate-limit responses like any other failure.
-- **It's safe by default.** `createFetch` only retries idempotent methods, so a timed-out `POST` can't double-charge anyone.
-- **It understands real-world errors.** Node's `TypeError: fetch failed` and the browser's `Failed to fetch` are classified as network errors, and a deliberate abort is never reported as a timeout.
-- **It's not tied to a client.** `withProgress`, `withDedupe` and `createLimiter` work with any streamed body or async function.
-
----
-
-## Install
-
-```bash
-npm install @boy-offi9-inc/reqkit
+```js
+// Deno
+import { createFetch } from "npm:@boy-offi9-inc/reqkit";
 ```
+
+```html
+<!-- Browser, no build step (pin a version in production) -->
+<script type="module">
+  import { createFetch } from "https://cdn.jsdelivr.net/npm/@boy-offi9-inc/reqkit/dist/reqkit.mjs";
+</script>
+```
+
+## Playground and recipes
+
+- **[Interactive playground](https://boy-offi9-inc.github.io/reqkit/)** — every feature running in your browser against a fake server; nothing to install.
+- **[Recipes](./docs/recipes.md)** — using reqkit alongside axios, ky, got and undici; testing; LLM streaming.
+
+## Security
+
+reqkit handles data a server controls (headers, streams, redirects), so the defaults are conservative:
+
+- **Credentials stay on your origin.** With a `baseUrl`, the default `auth` token and the default `Authorization`, `Proxy-Authorization`, `Cookie`, `X-API-Key` and `X-Auth-Token` headers are only sent to that origin (plus any `trustedOrigins`). An absolute URL to another host doesn't receive them. Headers you pass for a specific call are always sent. Without a `baseUrl` or `trustedOrigins` there is no origin to compare against, so set at least one.
+- **Pagination stays on origin.** `paginateLinks` refuses a `Link: rel="next"` that points to another origin (`code: "PAGINATE_CROSS_ORIGIN"`); allow more with `origins: [...]`.
+- **Bounded input.** `readLines`, `readNDJSON` and `readSSE` run in linear time and throw `LINE_TOO_LONG` past `maxLineLength` (default 16 Mi characters); `parseLinkHeader` ignores headers over 64 KB; `withProgress` and `downloadResumable` accept `maxBytes`.
+- **Safe retries.** `createFetch` retries only idempotent methods (or requests carrying an `Idempotency-Key`). Cross-origin redirects are left to `fetch`, which strips `Authorization`.
+
+reqkit does not block requests to private or internal addresses. If you fetch user-supplied URLs on a server, validate them first. To report a vulnerability, see [SECURITY.md](./SECURITY.md).
 
 ---
 
@@ -145,7 +141,7 @@ const data = await withRetry(
   { retries: 3, baseDelayMs: 300, onRetry: (err, attempt, delayMs) => console.log(`retry ${attempt} in ${delayMs}ms`) }
 );
 
-// fetch doesn't throw on 4xx/5xx — retry on statuses by returning the Response:
+// fetch doesn't throw on 4xx/5xx, so list the statuses to retry:
 const res = await withRetry(() => fetch(url), { retryStatusCodes: [429, 500, 502, 503, 504] });
 ```
 
@@ -169,16 +165,15 @@ const res = await withRetry(() => fetch(url), { retryStatusCodes: [429, 500, 502
 When retries run out on a *result* (e.g. a 503), the last result is returned rather than thrown — you decide what a bad status means. Bodies of retried responses are cancelled so connections are freed.
 
 ```js
-// Cancel a long retry/backoff sequence externally — e.g. the user navigated away
 const controller = new AbortController();
 const promise = withRetry(() => fetch(url), { retries: 5, signal: controller.signal });
 controller.abort(); // rejects with RetryAbortedError, even mid-backoff
 ```
 
-**Stop early with `StopRetry`** — throw it from inside `fn` when an error is not worth retrying (bad credentials, a 400...):
+**`StopRetry`** — throw it from inside `fn` to stop retrying immediately:
 
 ```js
-const { withRetry, StopRetry } = require("@boy-offi9-inc/reqkit");
+import { withRetry, StopRetry } from "@boy-offi9-inc/reqkit";
 
 await withRetry(async () => {
   const res = await fetch(url);
@@ -289,7 +284,6 @@ Coalesces concurrent calls with the same arguments into a single in-flight call 
 ```js
 const getUser = withDedupe((id) => fetch(`/api/users/${id}`).then(r => r.json()));
 
-// Only one network request goes out — both callers share it.
 const [a, b] = await Promise.all([getUser(1), getUser(1)]);
 ```
 
@@ -302,7 +296,6 @@ Plain arguments are compared by value (object key order doesn't matter); anythin
 This is deduplication of *concurrent* calls, not a cache — once a call settles (success or failure), the next call with the same key starts fresh.
 
 ```js
-// Custom key when the default arg-based key isn't quite right
 const fn = withDedupe((req) => doFetch(req), { keyFn: (req) => req.url });
 ```
 
@@ -479,10 +472,10 @@ String matchers match the full URL, `pathname + search`, or the bare `pathname`;
 
 ### `createFetch(defaults)`
 
-Opt-in assembly of the pieces above into a fetch-like function. It's still plain `fetch` underneath: you get a standard `Response`, and you can pass your own `fetch`.
+Assembles the pieces above into one fetch-like function. It's still plain `fetch` underneath: you get a standard `Response` back, and you can supply your own `fetch`.
 
 ```js
-const { createFetch } = require("@boy-offi9-inc/reqkit");
+import { createFetch, HTTPError } from "@boy-offi9-inc/reqkit";
 
 const api = createFetch({
   baseUrl: "https://api.example.com/v1",
@@ -575,15 +568,14 @@ Only `GET` `200` responses are cached; `Cache-Control: no-store` and `Vary: *` a
 
 ---
 
-## Design notes
-
-- **Zero dependencies.** Nothing to audit, nothing to break underneath you.
-- **CJS + ESM.** `require()` and `import` both work.
-- **Composable, not a client.** Every function takes and returns plain values (`Response`, plain objects, `Uint8Array`) — nothing proprietary to learn.
-- **TypeScript types included**, hand-written (no build step to go wrong), with separate entries for CJS and ESM.
-
----
-
 ## Prior art
 
-reqkit's building blocks are small, from-scratch implementations of ideas that proved themselves in popular libraries — go look at them, they're great: [`p-retry`](https://github.com/sindresorhus/p-retry) (`StopRetry`, time budgets), [`ky`](https://github.com/sindresorhus/ky) and [`ofetch`](https://github.com/unjs/ofetch) (`HTTPError`, `json`/`query`/`baseUrl`, `extend`, retry statuses), [`got`](https://github.com/sindresorhus/got) and [`axios-retry`](https://github.com/softonic/axios-retry) (retry only idempotent methods, `calculateDelay`), [`p-limit`](https://github.com/sindresorhus/p-limit) (concurrency limiter), [`opossum`](https://github.com/nodeshift/opossum) (circuit breaker), [`bottleneck`](https://github.com/SGrondin/bottleneck) / [`p-throttle`](https://github.com/sindresorhus/p-throttle) (rate limiting), [`eventsource-parser`](https://github.com/rexxars/eventsource-parser) (SSE), [`nock`](https://github.com/nock/nock) / undici's `MockAgent` (mocking), the HTTP caching RFCs (`stale-while-revalidate`, conditional requests), and the AWS Architecture Blog's "full jitter" backoff.
+reqkit's building blocks are small independent implementations of ideas from [`p-retry`](https://github.com/sindresorhus/p-retry), [`ky`](https://github.com/sindresorhus/ky), [`ofetch`](https://github.com/unjs/ofetch), [`got`](https://github.com/sindresorhus/got), [`axios-retry`](https://github.com/softonic/axios-retry), [`p-limit`](https://github.com/sindresorhus/p-limit), [`opossum`](https://github.com/nodeshift/opossum), [`bottleneck`](https://github.com/SGrondin/bottleneck), [`p-throttle`](https://github.com/sindresorhus/p-throttle), [`eventsource-parser`](https://github.com/rexxars/eventsource-parser) and [`nock`](https://github.com/nock/nock), plus the HTTP caching RFCs and the AWS "full jitter" backoff.
+
+## Contributing
+
+Issues and pull requests are welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) and the [architecture overview](./docs/architecture.md).
+
+## License
+
+[MIT](./LICENSE) © Boy Offi9

@@ -1,0 +1,5 @@
+* text=auto eol=lf
+
+# generated — collapsed in GitHub diffs and excluded from language stats
+playground/reqkit.mjs linguist-generated=true
+dist/** linguist-generated=true

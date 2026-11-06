@@ -1,7 +1,7 @@
 {
   "name": "@boy-offi9-inc/reqkit",
   "version": "0.7.1",
-  "description": "Small, composable HTTP helpers — retry with backoff and Retry-After, timeouts, normalized errors, rate limiter, circuit breaker, response cache, resumable downloads, SSE/NDJSON streams, mock fetch, and an opt-in createFetch. Not a client; works alongside fetch/axios/anything.",
+  "description": "Small, composable HTTP helpers \u2014 retry with backoff and Retry-After, timeouts, normalized errors, rate limiter, circuit breaker, response cache, resumable downloads, SSE/NDJSON streams, mock fetch, and an opt-in createFetch. Not a client; works alongside fetch/axios/anything.",
   "main": "./src/index.js",
   "types": "./types/index.d.ts",
   "exports": {
@@ -27,7 +27,8 @@
     "test": "node --test",
     "typecheck": "tsc -p tsconfig.json",
     "smoke": "node smoke/run.mjs",
-    "prepublishOnly": "npm run build && npm test && npm run typecheck"
+    "check": "npm run build && npm test && npm run typecheck && npm run smoke",
+    "prepublishOnly": "npm run check"
   },
   "keywords": [
     "http",
@@ -83,8 +84,9 @@
     "src",
     "types",
     "dist",
+    "docs/recipes.md",
     "README.md",
-    "RECIPES.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "devDependencies": {

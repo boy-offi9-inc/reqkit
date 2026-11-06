@@ -40,7 +40,7 @@ jobs:
             echo "publish=true" >> "$GITHUB_OUTPUT"
             echo "::notice title=Publishing::$NAME@$VERSION is new."
           else
-          
+
             echo "$OUT"
             exit 1
           fi
