@@ -362,10 +362,8 @@ function createFetch(defaults = {}) {
         emitEvent({ type: "attempt", url: ctx.url, method: finalMethod, attempt: state.attempts });
         const attempt = async () => {
           if (limiter) {
-            const waitStart = Date.now();
-            await limiter.acquire({ signal: netSignal });
-            const waitedMs = Date.now() - waitStart;
-            if (waitedMs >= 1) emitEvent({ type: "ratelimit", url: ctx.url, method: finalMethod, waitedMs });
+            const waitedMs = await limiter.acquire({ signal: netSignal });
+            if (waitedMs > 0) emitEvent({ type: "ratelimit", url: ctx.url, method: finalMethod, waitedMs });
           }
           const res = await withTimeout(
             (attemptSignal) => {

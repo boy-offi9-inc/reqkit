@@ -50,6 +50,7 @@ function createRateLimiter(opts = {}) {
   let tail = Promise.resolve();
 
   async function take(signal) {
+    let waitedMs = 0;
     for (;;) {
       signal?.throwIfAborted?.();
       const now = Date.now();
@@ -61,13 +62,15 @@ function createRateLimiter(opts = {}) {
 
       if (waitMs <= 0) {
         stamps.push(now);
-        return;
+        return waitedMs;
       }
+      const waitStartedAt = Date.now();
       await abortableSleep(waitMs, signal);
+      waitedMs += Date.now() - waitStartedAt;
     }
   }
 
-  /** Resolves when it's your turn. Rejects with the signal's reason if aborted while waiting. */
+  /** Resolves with the time spent waiting. Rejects if aborted while waiting. */
   function acquire({ signal } = {}) {
     const turn = tail.then(() => take(signal));
     tail = turn.catch(() => {});
