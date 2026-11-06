@@ -1,5 +1,5 @@
 // createFetch and the request/response helpers — src/http/
-import type { CircuitBreaker, CircuitBreakerOptions, RateLimiter, RateLimiterOptions, RetryOptions } from "./resilience";
+import type { CircuitBreaker, CircuitBreakerOptions, CircuitState, RateLimiter, RateLimiterOptions, RetryOptions } from "./resilience";
 
 export interface JsonSafeResult<T = unknown> {
   data: T | null;
@@ -64,6 +64,8 @@ export interface CreateFetchDefaults {
   fetch?: typeof fetch;
   onRequest?: (ctx: FetchHookContext) => void | Promise<void>;
   onResponse?: (ctx: FetchHookContext & { response: Response }) => void | Promise<void>;
+  /** One callback for everything that happens. Errors thrown by the handler are ignored. */
+  onEvent?: (event: FetchEvent) => void | Promise<void>;
 }
 
 export interface ReqkitRequestInit extends Omit<RequestInit, "headers" | "cache"> {
@@ -104,7 +106,7 @@ export interface MemoryCache extends CacheStore {
 export function createMemoryCache(opts?: { maxEntries?: number }): MemoryCache;
 
 export interface CacheEvent {
-  type: "hit" | "stale" | "revalidated" | "miss" | "store";
+  type: "hit" | "stale" | "revalidated" | "miss" | "store" | "stale-if-error";
   url: string;
 }
 
@@ -113,6 +115,11 @@ export interface CacheOptions {
   ttl?: number;
   /** After the TTL, keep serving the stale copy for this long while refreshing in the background. Default 0. */
   staleWhileRevalidate?: number;
+  /**
+   * How long past the TTL a cached copy may still be served when the origin is failing
+   * (network error, timeout, open circuit, or a 5xx). 4xx responses and aborts are never masked. Default 0 (off).
+   */
+  staleIfError?: number;
   /** For the built-in memory store. Default 100. */
   maxEntries?: number;
   /** Responses larger than this aren't cached. Default 1 MiB. */
@@ -138,3 +145,36 @@ export interface AuthOptions {
   /** Default: `res.status === 401`. */
   shouldRefresh?: (response: Response) => boolean;
 }
+
+/** Events delivered to `createFetch({ onEvent })`. */
+export type FetchEvent =
+  | { type: "request"; url: string; method: string }
+  | { type: "attempt"; url: string; method: string; /** 1-based */ attempt: number }
+  | {
+      type: "retry";
+      url: string;
+      method: string;
+      /** The attempt that failed (1-based). */
+      attempt: number;
+      delayMs: number;
+      reason: "error" | "status";
+      status?: number;
+      error?: unknown;
+    }
+  | {
+      type: "response";
+      url: string;
+      method: string;
+      status: number;
+      ok: boolean;
+      durationMs: number;
+      /** Network attempts made (0 for a cache hit). */
+      attempts: number;
+      /** How the cache was involved, if it was. */
+      cache?: "hit" | "stale" | "revalidated" | "miss" | "stale-if-error";
+    }
+  | { type: "error"; url?: string; method?: string; error: unknown; durationMs: number; attempts: number }
+  | { type: "cache"; url: string; method: "GET"; event: CacheEvent["type"] }
+  | { type: "ratelimit"; url: string; method: string; waitedMs: number }
+  | { type: "circuit"; origin: string; state: CircuitState; previous: CircuitState }
+  | { type: "auth"; url: string; method: string; outcome: "refreshed" | "reused" | "failed"; error?: unknown };

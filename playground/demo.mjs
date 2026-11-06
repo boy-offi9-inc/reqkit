@@ -350,6 +350,90 @@ await Promise.all(urls.map((u) => api.json(u)));`,
   },
 
   {
+    id: "stale-if-error",
+    title: "A cache that survives an outage",
+    blurb: "The server goes down. With staleIfError, reqkit keeps serving the last good response instead of failing — and picks up fresh data on its own once the server is back.",
+    code: `const api = createFetch({
+  cache: { ttl: 300, staleIfError: 60_000 },
+});
+await api.json("/config"); // server is down? still works`,
+    async run(log, { scale = 1 } = {}) {
+      const { say } = makeClock(log);
+      let healthy = true;
+      let version = 1;
+      const mock = createMockFetch();
+      mock.get("/config").replyWith(() => (healthy ? { status: 200, body: { version } } : { status: 503, body: "service unavailable" }));
+
+      const ttl = 200 * scale;
+      const api = createFetch({
+        baseUrl: "https://api.demo",
+        fetch: traced(mock.fetch, say),
+        retry: false,
+        cache: { ttl, staleIfError: 60_000, onEvent: (e) => say(`   cache ${e.type}`) },
+      });
+
+      const versions = [];
+      const call = async (label) => {
+        say(label);
+        const { version: v } = await api.json("/config");
+        versions.push(v);
+        say(`   → app received config v${v}`);
+      };
+
+      await call("call 1 (server healthy)");
+      await sleep(ttl * 1.5);
+      healthy = false;
+      say("💥 the server goes down");
+      await call("call 2 (cache expired, server returns 503)");
+      await call("call 3 (still down)");
+      healthy = true;
+      version = 2;
+      say("✅ the server recovers with a new config");
+      await call("call 4");
+      say(`✓ the app never saw an error: it received v${versions.join(", v")}`);
+      return { versions, requests: mock.calls.length };
+    },
+  },
+
+  {
+    id: "events",
+    title: "One hook to observe everything",
+    blurb: "onEvent reports every request, attempt, retry, cache hit and response with timings — ready to feed a logger or a metrics client.",
+    code: `const api = createFetch({
+  onEvent: (e) => logger.info(e.type, e),
+});`,
+    async run(log, { scale = 1 } = {}) {
+      const { say } = makeClock(log);
+      const mock = createMockFetch();
+      mock.get("/orders").replyOnce(503, "busy", { headers: { "retry-after": String(0.15 * scale) } }).reply(200, [{ id: 1 }]);
+
+      const seen = [];
+      const api = createFetch({
+        baseUrl: "https://api.demo",
+        fetch: mock.fetch,
+        cache: { ttl: 60_000 },
+        onEvent: (e) => {
+          seen.push(e);
+          const path = e.url ? new URL(e.url).pathname : "";
+          if (e.type === "request") say(`request   ${e.method} ${path}`);
+          else if (e.type === "attempt") say(`attempt   #${e.attempt}`);
+          else if (e.type === "retry") say(`retry     #${e.attempt} fails (${e.reason}${e.status ? " " + e.status : ""}) → waiting ${Math.round(e.delayMs)}ms`);
+          else if (e.type === "cache") say(`cache     ${e.event}`);
+          else if (e.type === "response") say(`response  ${e.status} in ${e.durationMs}ms · attempts=${e.attempts} · cache=${e.cache ?? "—"}`);
+        },
+      });
+
+      await api.json("/orders");
+      await sleep(20 * scale);
+      say("— same call again —");
+      await api.json("/orders");
+      const responses = seen.filter((e) => e.type === "response");
+      say(`✓ ${seen.length} events: the first call retried once, the second came from the cache with 0 attempts`);
+      return { events: seen.length, firstAttempts: responses[0].attempts, secondCache: responses[1].cache, secondAttempts: responses[1].attempts };
+    },
+  },
+
+  {
     id: "resume",
     title: "Resumable download",
     blurb: "The connection drops at ~45%. Instead of starting over, reqkit resumes with a Range request from the exact byte it stopped at.",

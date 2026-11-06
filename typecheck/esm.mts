@@ -187,3 +187,39 @@ export async function checkSecurityOptions() {
   for await (const r of paginateLinks(api, "/x", { origins: ["https://api.x.test"] })) void r;
   return base;
 }
+
+import type { FetchEvent } from "@boy-offi9-inc/reqkit";
+
+export function checkEvents() {
+  const seen: FetchEvent[] = [];
+  createFetch({
+    cache: { ttl: 1000, staleIfError: 60_000 },
+    onEvent: (e) => {
+      seen.push(e);
+      switch (e.type) {
+        case "response": {
+          const status: number = e.status;
+          const how: "hit" | "stale" | "revalidated" | "miss" | "stale-if-error" | undefined = e.cache;
+          void [status, how, e.durationMs, e.attempts];
+          break;
+        }
+        case "retry":
+          void [e.attempt, e.delayMs, e.reason, e.status];
+          break;
+        case "circuit":
+          void [e.origin, e.state, e.previous];
+          break;
+        case "auth":
+          void e.outcome;
+          break;
+        case "ratelimit":
+          void e.waitedMs;
+          break;
+        case "error":
+          void e.error;
+          break;
+      }
+    },
+  });
+  return seen;
+}

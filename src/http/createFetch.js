@@ -94,8 +94,11 @@ function mergeDefaults(base, extra) {
  *  - `rateLimit`: stay under a budget and obey X-RateLimit-* / Retry-After
  *    *before* the server has to say 429
  *  - `circuitBreaker`: fail fast against a service that keeps failing
- *  - `cache`: in-memory GET cache with TTL, stale-while-revalidate and
- *    ETag / Last-Modified revalidation (304s)
+ *  - `cache`: in-memory GET cache with TTL, stale-while-revalidate,
+ *    stale-if-error and ETag / Last-Modified revalidation (304s)
+ *  - `onEvent`: one callback for everything that happens (request, attempt,
+ *    retry, response, error, cache, rate-limit waits, circuit changes, token
+ *    refreshes) — plug it into your logger or metrics
  *  - concurrent GET de-duplication (withDedupe)
  *  - `auth`: attach a token, and on a 401 refresh it ONCE (shared by all
  *    concurrent requests) and replay the request
@@ -117,8 +120,9 @@ function mergeDefaults(base, extra) {
  *   createRateLimiter() instance to share one budget
  * @param {boolean | object | Function} [defaults.circuitBreaker] - options for
  *   a per-origin breaker, a createCircuitBreaker() instance, or `(url) => breaker`
- * @param {boolean | object} [defaults.cache] - `{ ttl, staleWhileRevalidate,
- *   maxEntries, maxBodyBytes, store, onEvent }`; `true` = 60s TTL
+ * @param {boolean | object} [defaults.cache] - `{ ttl, staleWhileRevalidate, staleIfError,
+ *   maxEntries, maxBodyBytes, store, onEvent }`; `true` = 60s TTL. `staleIfError` (ms) lets a
+ *   cached copy be served for that long past its TTL when the network fails or the server answers 5xx.
  * @param {object} [defaults.auth] - `{ getToken, refresh, header?, scheme?, shouldRefresh? }`.
  *   `getToken()` supplies the current token (sync or async); on a 401 (or
  *   whatever `shouldRefresh(response)` says) `refresh({ token, response })` is
@@ -133,6 +137,9 @@ function mergeDefaults(base, extra) {
  * @param {(ctx: {url: string, init: object}) => void | Promise<void>} [defaults.onRequest] -
  *   runs once per call; may mutate ctx.url / ctx.init (e.g. add a header)
  * @param {(ctx: {url: string, init: object, response: Response}) => void | Promise<void>} [defaults.onResponse]
+ * @param {(event: object) => void | Promise<void>} [defaults.onEvent] - receives `{ type, ... }` events:
+ *   "request", "attempt", "retry", "response", "error", "cache", "ratelimit", "circuit", "auth".
+ *   Errors thrown by the handler are swallowed — logging must never break a request.
  */
 function createFetch(defaults = {}) {
   const {
@@ -150,9 +157,21 @@ function createFetch(defaults = {}) {
     fetch: customFetch,
     onRequest,
     onResponse,
+    onEvent,
   } = defaults;
 
   const doFetch = (...args) => (customFetch || globalThis.fetch)(...args);
+
+  // A throwing (or rejecting) handler must never break a request.
+  const emitEvent = (event) => {
+    if (!onEvent) return;
+    try {
+      const result = onEvent(event);
+      if (result && typeof result.catch === "function") result.catch(() => {});
+    } catch {
+      // ignore
+    }
+  };
 
   // Origins allowed to receive default credentials. Empty = no baseUrl to compare against = unrestricted.
   const trusted = new Set();
@@ -183,7 +202,13 @@ function createFetch(defaults = {}) {
         : (url) => {
             const origin = originOf(url);
             if (!breakerRegistry.has(origin)) {
-              breakerRegistry.set(origin, createCircuitBreaker(circuitBreaker === true ? {} : circuitBreaker));
+              const options = circuitBreaker === true ? {} : { ...circuitBreaker };
+              const userOnStateChange = options.onStateChange;
+              options.onStateChange = (state, previous) => {
+                if (userOnStateChange) userOnStateChange(state, previous);
+                emitEvent({ type: "circuit", origin, state, previous });
+              };
+              breakerRegistry.set(origin, createCircuitBreaker(options));
             }
             return breakerRegistry.get(origin);
           };
@@ -193,6 +218,7 @@ function createFetch(defaults = {}) {
     : {
         ttl: 60000,
         staleWhileRevalidate: 0,
+        staleIfError: 0,
         maxEntries: 100,
         maxBodyBytes: undefined,
         ...(cache === true ? {} : cache),
@@ -206,7 +232,10 @@ function createFetch(defaults = {}) {
   }
   const pendingStores = cacheCfg ? cacheCfg.pending : null;
   const revalidating = cacheCfg ? cacheCfg.revalidating : null;
-  const emit = (type, url) => cacheCfg && cacheCfg.onEvent && cacheCfg.onEvent({ type, url });
+  const emit = (type, url) => {
+    if (cacheCfg && cacheCfg.onEvent) cacheCfg.onEvent({ type, url });
+    emitEvent({ type: "cache", url, method: "GET", event: type });
+  };
 
   // Shared in-flight GETs. Every caller gets its own clone of the response so
   // body reads don't fight each other.
@@ -230,9 +259,12 @@ function createFetch(defaults = {}) {
   // Returns a token newer than `usedToken`, refreshing at most once no matter
   // how many requests were rejected at the same time. If someone else already
   // refreshed (the current token isn't the one we used), just use that.
-  async function obtainFreshToken(authCfg, tokenUsed, response) {
+  async function obtainFreshToken(authCfg, tokenUsed, response, info) {
     const current = await authCfg.getToken();
-    if (current && current !== tokenUsed) return current;
+    if (current && current !== tokenUsed) {
+      emitEvent({ type: "auth", ...info, outcome: "reused" });
+      return current;
+    }
 
     const state = refreshStateFor(authCfg);
     if (!state.inflight) {
@@ -245,10 +277,21 @@ function createFetch(defaults = {}) {
         }
       })();
     }
-    return state.inflight;
+    try {
+      const token = await state.inflight;
+      emitEvent({ type: "auth", ...info, outcome: "refreshed" });
+      return token;
+    } catch (error) {
+      emitEvent({ type: "auth", ...info, outcome: "failed", error });
+      throw error;
+    }
   }
 
-  async function request(input, init = {}) {
+  // May a cached copy be served because the origin is failing?
+  const withinStaleIfError = (entry) =>
+    cacheCfg && cacheCfg.staleIfError > 0 && Date.now() - entry.storedAt < cacheCfg.ttl + cacheCfg.staleIfError;
+
+  async function execute(input, init, state) {
     const {
       query,
       json,
@@ -263,6 +306,8 @@ function createFetch(defaults = {}) {
 
     const method = String(fetchInit.method || "GET").toUpperCase();
     const url = joinUrl(baseUrl, input, query);
+    state.url = url;
+    state.method = method;
     const credentialsAllowed = isTrustedTarget(url);
 
     const defaultHeaderSet = await resolveHeaders(defaultHeaders);
@@ -285,6 +330,9 @@ function createFetch(defaults = {}) {
     if (onRequest) await onRequest(ctx);
     const finalHeaders = ctx.init.headers instanceof Headers ? ctx.init.headers : new Headers(ctx.init.headers);
     const finalMethod = String(ctx.init.method || method).toUpperCase();
+    state.url = ctx.url;
+    state.method = finalMethod;
+    emitEvent({ type: "request", url: ctx.url, method: finalMethod });
 
     // --- auth: attach the current token (unless the caller set the header) ----
     const authHeader = auth ? String(auth.header || "authorization").toLowerCase() : null;
@@ -310,8 +358,15 @@ function createFetch(defaults = {}) {
     // `netSignal` are parameters so background revalidation can reuse this.
     function network(netHeaders, netSignal) {
       const attemptOnce = () => {
+        state.attempts++;
+        emitEvent({ type: "attempt", url: ctx.url, method: finalMethod, attempt: state.attempts });
         const attempt = async () => {
-          if (limiter) await limiter.acquire({ signal: netSignal });
+          if (limiter) {
+            const waitStart = Date.now();
+            await limiter.acquire({ signal: netSignal });
+            const waitedMs = Date.now() - waitStart;
+            if (waitedMs >= 1) emitEvent({ type: "ratelimit", url: ctx.url, method: finalMethod, waitedMs });
+          }
           const res = await withTimeout(
             (attemptSignal) => {
               const attemptInit = { ...ctx.init, method: finalMethod, headers: netHeaders, signal: attemptSignal };
@@ -343,6 +398,19 @@ function createFetch(defaults = {}) {
             ...retryRest,
             retries,
             retryStatusCodes: statusCodes || DEFAULT_RETRY_STATUS_CODES,
+            onRetry: (err, attempt, delayMs, rctx) => {
+              if (retryRest.onRetry) retryRest.onRetry(err, attempt, delayMs, rctx);
+              emitEvent({
+                type: "retry",
+                url: ctx.url,
+                method: finalMethod,
+                attempt: attempt + 1,
+                delayMs,
+                reason: rctx.reason === "result" ? "status" : "error",
+                status: rctx.status,
+                error: err,
+              });
+            },
             shouldRetry:
               customShouldRetry ||
               ((err) => {
@@ -374,6 +442,17 @@ function createFetch(defaults = {}) {
     let entry = null;
 
     const finish = async (response) => {
+      state.responded = true;
+      emitEvent({
+        type: "response",
+        url: ctx.url,
+        method: finalMethod,
+        status: response.status,
+        ok: response.ok,
+        durationMs: Date.now() - state.startedAt,
+        attempts: state.attempts,
+        cache: state.cache,
+      });
       if (onResponse) await onResponse({ url: ctx.url, init: ctx.init, response });
       if (throwHttpErrors && !response.ok) {
         throw new HTTPError(response, { method: finalMethod, url: ctx.url });
@@ -388,10 +467,12 @@ function createFetch(defaults = {}) {
         const age = Date.now() - entry.storedAt;
         if (age < cacheCfg.ttl) {
           emit("hit", ctx.url);
+          state.cache = "hit";
           return finish(entryToResponse(entry));
         }
         if (age < cacheCfg.ttl + cacheCfg.staleWhileRevalidate) {
           emit("stale", ctx.url);
+          state.cache = "stale";
           if (!revalidating.has(key)) {
             revalidating.add(key);
             const staleEntry = entry;
@@ -428,13 +509,19 @@ function createFetch(defaults = {}) {
     } catch (err) {
       // Present a user abort as the plain AbortError they caused, not as retry internals.
       if (err instanceof RetryAbortedError && signal && signal.aborted) throw signal.reason ?? err;
+      // The network failed but we still hold a usable copy: serve it (never for a deliberate abort).
+      if (entry && withinStaleIfError(entry) && !(signal && signal.aborted) && !(err && err.name === "AbortError")) {
+        emit("stale-if-error", ctx.url);
+        state.cache = "stale-if-error";
+        return finish(entryToResponse(entry));
+      }
       throw err;
     }
 
     // --- auth: a rejected token is refreshed once, then the request replays ----
     const needsRefresh = auth && (auth.shouldRefresh ? auth.shouldRefresh(response) : response.status === 401);
     if (usedToken && needsRefresh && !isStreamBody(ctx.init.body)) {
-      const fresh = await obtainFreshToken(auth, usedToken, response);
+      const fresh = await obtainFreshToken(auth, usedToken, response, { url: ctx.url, method: finalMethod });
       if (fresh) {
         await discardBody(response);
         finalHeaders.set(authHeader, formatToken(fresh));
@@ -449,20 +536,43 @@ function createFetch(defaults = {}) {
       }
     }
 
+    // The server answered, but with an error, and we still hold a usable copy.
+    if (useCache && entry && response.status >= 500 && withinStaleIfError(entry)) {
+      await discardBody(response);
+      emit("stale-if-error", ctx.url);
+      state.cache = "stale-if-error";
+      return finish(entryToResponse(entry));
+    }
+
     if (useCache) {
       if (response.status === 304 && entry) {
         entry.storedAt = Date.now();
         await cacheCfg.store.set(key, entry);
         emit("revalidated", ctx.url);
+        state.cache = "revalidated";
         await discardBody(response);
         response = entryToResponse(entry);
       } else {
         emit("miss", ctx.url);
+        state.cache = "miss";
         if (response.status === 200) scheduleStore(key, response, ctx.url);
       }
     }
 
     return finish(response);
+  }
+
+  async function request(input, init = {}) {
+    const state = { startedAt: Date.now(), attempts: 0, responded: false, cache: undefined, url: undefined, method: undefined };
+    try {
+      return await execute(input, init, state);
+    } catch (error) {
+      // A non-2xx HTTPError was already reported as a "response" event.
+      if (!state.responded) {
+        emitEvent({ type: "error", url: state.url, method: state.method, error, durationMs: Date.now() - state.startedAt, attempts: state.attempts });
+      }
+      throw error;
+    }
   }
 
   /** The `baseUrl` this instance was created with (paginateLinks uses it to stay on-origin). */

@@ -207,6 +207,35 @@ export function makeChecks(r) {
       equal(code, "LINE_TOO_LONG", "error code");
     },
 
+    async "stale-if-error serves the cached copy while the server fails"() {
+      const mock = r.createMockFetch();
+      mock.get("/c").replyOnce(200, "cached").reply(500, "down");
+      const api = r.createFetch({ fetch: mock.fetch, baseUrl: "https://api.test", retry: false, cache: { ttl: 5, staleIfError: 60000 } });
+      equal(await (await api("/c")).text(), "cached", "first response");
+      await sleep(30);
+      equal(await (await api("/c")).text(), "cached", "served from cache while the origin returns 500");
+    },
+
+    async "onEvent reports retries and the final response"() {
+      const mock = r.createMockFetch();
+      mock.get("/e").replyOnce(503, "busy", { headers: { "retry-after": "0" } }).reply(200, "ok");
+      const types = [];
+      let attempts;
+      const api = r.createFetch({
+        fetch: mock.fetch,
+        baseUrl: "https://api.test",
+        retry: { baseDelayMs: 1 },
+        onEvent: (e) => {
+          types.push(e.type);
+          if (e.type === "response") attempts = e.attempts;
+        },
+      });
+      await api("/e");
+      assert(types.includes("retry"), "a retry event was emitted");
+      equal(types[types.length - 1], "response", "response comes last");
+      equal(attempts, 2, "attempts");
+    },
+
     async "downloadResumable resumes after a dropped connection"() {
       const FILE = new Uint8Array(3000).map((_, i) => i % 251);
       let call = 0;
