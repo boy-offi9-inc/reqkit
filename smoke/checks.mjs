@@ -23,7 +23,7 @@ export function makeChecks(r) {
   return {
     "exports are present"() {
       for (const name of [
-        "withRetry", "withTimeout", "normalizeError", "createFetch", "createMockFetch", "createLimiter",
+        "withRetry", "withTimeout", "withHedge", "normalizeError", "createFetch", "createMockFetch", "createLimiter",
         "createRateLimiter", "createCircuitBreaker", "downloadResumable", "readSSE", "streamSSE", "paginate", "paginateLinks", "readNDJSON", "readLines",
         "withDedupe", "withProgress", "buildQuery", "parseJsonSafe", "retryAfterAware", "HTTPError",
       ]) {
@@ -234,6 +234,25 @@ export function makeChecks(r) {
       assert(types.includes("retry"), "a retry event was emitted");
       equal(types[types.length - 1], "response", "response comes last");
       equal(attempts, 2, "attempts");
+    },
+
+    async "withHedge: a backup beats a slow request, and the loser is cancelled"() {
+      let slowSignal;
+      const out = await r.withHedge(
+        (signal, index) => {
+          if (index === 0) {
+            slowSignal = signal;
+            return new Promise((resolve, reject) => {
+              const timer = setTimeout(() => resolve("slow"), 500);
+              signal.addEventListener("abort", () => (clearTimeout(timer), reject(signal.reason)));
+            });
+          }
+          return "fast";
+        },
+        { delayMs: 20 }
+      );
+      equal(out, "fast", "winner");
+      assert(slowSignal.aborted, "the slow attempt was aborted");
     },
 
     async "downloadResumable resumes after a dropped connection"() {

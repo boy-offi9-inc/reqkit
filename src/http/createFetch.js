@@ -1,6 +1,8 @@
 const { withRetry, RetryAbortedError } = require("../resilience/retry");
 const { withTimeout } = require("../resilience/timeout");
 const { withDedupe } = require("../resilience/dedupe");
+const { withHedge } = require("../resilience/hedge");
+const { createLatencyTracker } = require("./latency");
 const { buildQuery } = require("./buildQuery");
 const { parseJsonSafe } = require("./parseJsonSafe");
 const { normalizeError } = require("../errors/normalizeError");
@@ -99,6 +101,8 @@ function mergeDefaults(base, extra) {
  *  - `onEvent`: one callback for everything that happens (request, attempt,
  *    retry, response, error, cache, rate-limit waits, circuit changes, token
  *    refreshes) — plug it into your logger or metrics
+ *  - `hedge`: if a request is slow, send a backup and take whichever answers
+ *    first (idempotent requests only) — trims tail latency
  *  - concurrent GET de-duplication (withDedupe)
  *  - `auth`: attach a token, and on a 401 refresh it ONCE (shared by all
  *    concurrent requests) and replay the request
@@ -131,6 +135,11 @@ function mergeDefaults(base, extra) {
  * @param {string[]} [defaults.trustedOrigins] - extra origins ("https://cdn.example.com") that may
  *   receive the default credentials, besides `baseUrl`'s. With neither `baseUrl` nor
  *   `trustedOrigins` set there is nothing to compare against and credentials go everywhere.
+ * @param {boolean | object} [defaults.hedge] - `{ delayMs, maxHedges, methods }` (or `true`). If an attempt
+ *   hasn't answered after `delayMs`, a backup request is sent and the first good answer wins. `delayMs`
+ *   is a number, or "auto" (default) to hedge at your own recent p95 latency per origin (tuned with
+ *   `percentile` = 0.95, `minDelayMs` = 20, `fallbackDelayMs` = 300 until 10 samples exist). Applies to
+ *   idempotent methods (or requests with an `Idempotency-Key`) only. Disables `dedupe` for hedged requests.
  * @param {boolean} [defaults.dedupe=false] - merge identical concurrent GET/HEAD calls
  * @param {boolean} [defaults.throwHttpErrors=true]
  * @param {typeof fetch} [defaults.fetch=globalThis.fetch]
@@ -152,6 +161,7 @@ function createFetch(defaults = {}) {
     cache,
     auth,
     trustedOrigins,
+    hedge,
     dedupe = false,
     throwHttpErrors: defaultThrow = true,
     fetch: customFetch,
@@ -237,6 +247,12 @@ function createFetch(defaults = {}) {
     emitEvent({ type: "cache", url, method: "GET", event: type });
   };
 
+  const hedgeDefaults = !hedge
+    ? null
+    : { delayMs: "auto", maxHedges: 1, ...(hedge === true ? {} : hedge) };
+  if (hedgeDefaults && !hedgeDefaults.tracker) hedgeDefaults.tracker = createLatencyTracker();
+  const fallbackTracker = hedgeDefaults ? null : createLatencyTracker(); // for per-request `hedge` on an instance with no defaults
+
   // Shared in-flight GETs. Every caller gets its own clone of the response so
   // body reads don't fight each other.
   const sharedFetch = withDedupe((key, url, init) => doFetch(url, init), { keyFn: (key) => key });
@@ -301,6 +317,7 @@ function createFetch(defaults = {}) {
       signal,
       headers: initHeaders,
       cache: cacheMode,
+      hedge: hedgeOpt,
       ...fetchInit
     } = init;
 
@@ -353,6 +370,26 @@ function createFetch(defaults = {}) {
       (methods.map((m) => m.toUpperCase()).includes(finalMethod) || hasIdempotencyKey);
     const { statusCodes, methods: _methods, retries = 2, shouldRetry: customShouldRetry, ...retryRest } = retryCfg || {};
 
+    // --- hedging policy ----------------------------------------------------
+    const hedgeCfg =
+      hedgeOpt === false || (!hedgeDefaults && !hedgeOpt)
+        ? null
+        : { delayMs: "auto", maxHedges: 1, ...(hedgeDefaults || {}), ...(hedgeOpt && hedgeOpt !== true ? hedgeOpt : {}) };
+    const hedgeMethods = ((hedgeCfg && hedgeCfg.methods) || DEFAULT_RETRY_METHODS).map((m) => m.toUpperCase());
+    const canHedge =
+      hedgeCfg !== null &&
+      hedgeCfg.maxHedges >= 1 &&
+      !isStreamBody(ctx.init.body) &&
+      (hedgeMethods.includes(finalMethod) || hasIdempotencyKey);
+    const tracker = canHedge ? (hedgeDefaults ? hedgeDefaults.tracker : fallbackTracker) : null;
+    const trackerKey = originOf(ctx.url);
+    const hedgeDelay = () => {
+      if (typeof hedgeCfg.delayMs === "number") return hedgeCfg.delayMs;
+      const { percentile = 0.95, minDelayMs = 20, fallbackDelayMs = 300, minSamples = 10 } = hedgeCfg;
+      if (tracker.count(trackerKey) < minSamples) return fallbackDelayMs;
+      return Math.max(minDelayMs, tracker.percentile(trackerKey, percentile));
+    };
+
     // One trip to the network: rate limit → circuit breaker → per-attempt
     // timeout → fetch, retried per the policy above. `netHeaders` and
     // `netSignal` are parameters so background revalidation can reuse this.
@@ -360,16 +397,21 @@ function createFetch(defaults = {}) {
       const attemptOnce = () => {
         state.attempts++;
         emitEvent({ type: "attempt", url: ctx.url, method: finalMethod, attempt: state.attempts });
-        const attempt = async () => {
+        // A single request: rate limit → per-attempt timeout → fetch. `sig` is what cancels it —
+        // the caller's signal normally, or the hedge's own signal when it can lose a race.
+        const runOnce = async (sig) => {
           if (limiter) {
-            const waitedMs = await limiter.acquire({ signal: netSignal });
-            if (waitedMs > 0) emitEvent({ type: "ratelimit", url: ctx.url, method: finalMethod, waitedMs });
+            const waitStart = Date.now();
+            await limiter.acquire({ signal: sig });
+            const waitedMs = Date.now() - waitStart;
+            // Only report waits that mean something; scheduling jitter on an immediate acquire is not a wait.
+            if (waitedMs >= 5) emitEvent({ type: "ratelimit", url: ctx.url, method: finalMethod, waitedMs });
           }
+          const startedOne = Date.now();
           const res = await withTimeout(
             (attemptSignal) => {
               const attemptInit = { ...ctx.init, method: finalMethod, headers: netHeaders, signal: attemptSignal };
-              const useDedupe =
-                dedupe && !netSignal && !ctx.init.body && (finalMethod === "GET" || finalMethod === "HEAD");
+              const useDedupe = dedupe && !sig && !ctx.init.body && (finalMethod === "GET" || finalMethod === "HEAD");
               if (!useDedupe) return doFetch(ctx.url, attemptInit);
               // No per-attempt signal on a shared request: aborting one caller
               // must never cancel everyone else's. It still gets its own
@@ -382,11 +424,27 @@ function createFetch(defaults = {}) {
               return sharedFetch(key, ctx.url, sharedInit).then((res) => res.clone());
             },
             timeout === false ? Infinity : timeout,
-            { signal: netSignal }
+            { signal: sig }
           );
           if (limiter) limiter.update(res);
+          if (tracker && res.status < 500) tracker.record(trackerKey, Date.now() - startedOne);
           return res;
         };
+        const attempt = canHedge
+          ? () =>
+              withHedge((hedgeSignal) => runOnce(hedgeSignal), {
+                delayMs: hedgeDelay,
+                maxHedges: hedgeCfg.maxHedges,
+                signal: netSignal,
+                onHedge: ({ index, afterMs }) => {
+                  state.hedges++;
+                  emitEvent({ type: "hedge", url: ctx.url, method: finalMethod, index, afterMs });
+                },
+                onWinner: (index) => {
+                  state.hedgeWon = index > 0;
+                },
+              })
+          : () => runOnce(netSignal);
         const breaker = breakerFor && breakerFor(ctx.url);
         return breaker ? breaker.run(attempt) : attempt();
       };
@@ -450,6 +508,8 @@ function createFetch(defaults = {}) {
         durationMs: Date.now() - state.startedAt,
         attempts: state.attempts,
         cache: state.cache,
+        hedges: state.hedges,
+        hedgeWon: state.hedgeWon,
       });
       if (onResponse) await onResponse({ url: ctx.url, init: ctx.init, response });
       if (throwHttpErrors && !response.ok) {
@@ -561,13 +621,21 @@ function createFetch(defaults = {}) {
   }
 
   async function request(input, init = {}) {
-    const state = { startedAt: Date.now(), attempts: 0, responded: false, cache: undefined, url: undefined, method: undefined };
+    const state = { startedAt: Date.now(), attempts: 0, hedges: 0, hedgeWon: false, responded: false, cache: undefined, url: undefined, method: undefined };
     try {
       return await execute(input, init, state);
     } catch (error) {
       // A non-2xx HTTPError was already reported as a "response" event.
       if (!state.responded) {
-        emitEvent({ type: "error", url: state.url, method: state.method, error, durationMs: Date.now() - state.startedAt, attempts: state.attempts });
+        emitEvent({
+          type: "error",
+          url: state.url,
+          method: state.method,
+          error,
+          durationMs: Date.now() - state.startedAt,
+          attempts: state.attempts,
+          hedges: state.hedges,
+        });
       }
       throw error;
     }
@@ -594,6 +662,7 @@ function createFetch(defaults = {}) {
           rateLimit: limiter || undefined,
           circuitBreaker: breakerFor || undefined,
           cache: cacheCfg || undefined,
+          hedge: hedgeDefaults || undefined,
         },
         overrides
       )

@@ -76,6 +76,7 @@ Requires Node 18+. TypeScript types are included.
 | Slow down *before* the server says 429 (obey `X-RateLimit-*`) | [`createRateLimiter`](#createratelimiteropts) |
 | Stop hammering a service that keeps failing | [`createCircuitBreaker`](#createcircuitbreakeropts) |
 | Cache GETs (TTL, stale-while-revalidate, stale-if-error, ETag/304) | [`createFetch` → `cache`](#caching) |
+| Cut tail latency with backup requests | [`withHedge`](#withhedgefn-opts) / [`createFetch` → `hedge`](#hedged-requests) |
 | Log or measure every request, retry and cache hit | [`createFetch` → `onEvent`](#events-and-logging) |
 | Attach a token and refresh it on 401 — once, even with many requests in flight | [`createFetch` → `auth`](#auth-token-refresh) |
 | Walk a paginated API (cursor, offset, `Link` headers) | [`paginate` / `paginateLinks`](#pagination-paginate-paginatepages-paginatelinks) |
@@ -200,6 +201,30 @@ Pass your own `signal` to cancel from the outside too — it's linked into the o
 ```js
 await withTimeout(signal => fetch(url, { signal }), 5000, { signal: userController.signal });
 ```
+
+### `withHedge(fn, opts)`
+
+Insurance against the occasional slow request. It starts `fn`; if that hasn't answered after `delayMs`, it starts a backup (a *hedge*) and takes whichever succeeds first. The others are aborted, so connections are freed.
+
+```js
+import { withHedge } from "@boy-offi9-inc/reqkit";
+
+const res = await withHedge((signal) => fetch(url, { signal }), { delayMs: 150 });
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `delayMs` | — (required) | wait before launching backup *n*: a number, or `(n) => ms` |
+| `maxHedges` | `1` | how many backups at most |
+| `isFailure` | `status >= 500` | results that count as failed — the next backup launches immediately |
+| `hedgeOnError` | `true` | when an attempt *throws*, launch the next backup immediately |
+| `onHedge` | — | `({ index, afterMs }) => void` — a backup was launched |
+| `onWinner` | — | `(index) => void` — which attempt won (`0` = the original) |
+| `signal` | — | cancels every attempt and rejects with the signal's reason |
+
+`fn(signal, index)` receives an `AbortSignal` (pass it to `fetch`) and the attempt number (`0` = the original). If every attempt fails, the last failed *result* is returned (a 503 `Response` isn't thrown); if none produced a result, the last error is thrown. The bodies of responses that lose are cancelled.
+
+Hedging sends extra requests, so only use it for calls that are safe to run twice (GETs and other idempotent calls).
 
 ### `normalizeError(err)`
 
@@ -511,6 +536,7 @@ const admin = api.extend({ headers: { "x-role": "admin" } }); // merges over the
 | `circuitBreaker` | — | `true` / options → one breaker **per origin**; or pass a shared [`createCircuitBreaker`](#createcircuitbreakeropts), or `(url) => breaker`. An open circuit stops retries immediately. |
 | `trustedOrigins` | — | extra origins that may receive the default credentials — see [Security](#security) |
 | `auth` | — | attach a token and refresh it on 401 — see [Auth token refresh](#auth-token-refresh) |
+| `hedge` | — | send a backup request when an attempt is slow — see [Hedged requests](#hedged-requests). `true` = hedge at your own recent p95 |
 | `cache` | — | in-memory GET cache — see [Caching](#caching). `true` = 60s TTL. Per request: `cache: false` bypasses, `"reload"` refreshes |
 | `dedupe` | `false` | merge identical concurrent `GET`/`HEAD` calls; every caller gets its own readable clone. Requests with their own `signal` are never merged. |
 | `throwHttpErrors` | `true` | throw `HTTPError` for non-2xx (`err.status`, `err.response`, `err.url`, `err.method`) |
@@ -541,6 +567,21 @@ await Promise.all(urls.map((u) => api.json(u))); // 20 requests, all 401 → one
 - **Options:** `header` (default `"authorization"`), `scheme` (default `"Bearer"`, `""` for a bare token such as an `X-API-Key`), `shouldRefresh(response)` (default: status 401). `refresh({ token, response })` may return the new token or just update your store. If `refresh` throws, every waiting request rejects with that error — and the next request tries again.
 - `extend()` children that share the same `auth` object share one refresh; the cache keys entries per token.
 
+#### Hedged requests
+
+```js
+const api = createFetch({ baseUrl: "https://api.example.com", hedge: true });          // hedge at your own recent p95
+const api2 = createFetch({ baseUrl: "https://api.example.com", hedge: { delayMs: 200 } }); // or a fixed delay
+```
+
+If an attempt hasn't answered after the delay, a backup request goes out and the first good response wins; the slower request is cancelled.
+
+- **Idempotent only.** GET, HEAD, OPTIONS, PUT and DELETE are hedged; a POST isn't unless it carries an `Idempotency-Key` (or you list the method in `methods`). Stream bodies are never hedged.
+- **`delayMs: "auto"`** (the default for `hedge: true`) waits for your own recent `percentile` latency (default 0.95) per origin, never less than `minDelayMs` (20), and uses `fallbackDelayMs` (300) until `minSamples` (10) responses have been seen. At p95 that's roughly 5% extra requests for a much shorter tail.
+- **Failures don't wait.** A 5xx response or a thrown error launches the backup immediately.
+- **Backups are real requests:** each one goes through the rate limiter. Hedging is applied per attempt, inside retries, and turns off request de-duplication for the hedged call.
+- Override per call with `hedge: false` or `hedge: { delayMs: 100 }`. `maxHedges` (default 1) allows more backups.
+
 #### Events and logging
 
 One callback receives everything that happens, so you can plug reqkit into your logger or metrics without wrapping anything.
@@ -561,8 +602,9 @@ const api = createFetch({
 | `request` | a call starts | `url`, `method` |
 | `attempt` | a network attempt starts | `url`, `method`, `attempt` (1-based) |
 | `retry` | an attempt failed and another will follow | `url`, `method`, `attempt`, `delayMs`, `reason` (`"error"` \| `"status"`), `status?`, `error?` |
-| `response` | the final response arrives (including non-2xx, before `HTTPError` is thrown) | `url`, `method`, `status`, `ok`, `durationMs`, `attempts`, `cache?` (`"hit"` \| `"stale"` \| `"revalidated"` \| `"miss"` \| `"stale-if-error"`) |
+| `response` | the final response arrives (including non-2xx, before `HTTPError` is thrown) | `url`, `method`, `status`, `ok`, `durationMs`, `attempts`, `hedges`, `hedgeWon`, `cache?` (`"hit"` \| `"stale"` \| `"revalidated"` \| `"miss"` \| `"stale-if-error"`) |
 | `error` | the call fails without a response — network error, timeout, abort, open circuit | `url?`, `method?`, `error`, `durationMs`, `attempts` |
+| `hedge` | a backup request was sent | `url`, `method`, `index`, `afterMs` |
 | `cache` | cache activity | `url`, `method`, `event` (`hit`, `stale`, `revalidated`, `miss`, `store`, `stale-if-error`) |
 | `ratelimit` | a call waited on the rate limiter | `url`, `method`, `waitedMs` |
 | `circuit` | a circuit breaker changed state (breakers created from options — one per origin) | `origin`, `state`, `previous` |

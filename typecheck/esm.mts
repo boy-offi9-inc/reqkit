@@ -223,3 +223,22 @@ export function checkEvents() {
   });
   return seen;
 }
+
+import { withHedge } from "@boy-offi9-inc/reqkit";
+
+export async function checkHedge(signal: AbortSignal) {
+  const body = await withHedge((s, index) => fetch(`https://x.test/${index}`, { signal: s }), {
+    delayMs: (n) => n * 100,
+    maxHedges: 2,
+    isFailure: (r) => !r.ok,
+    hedgeOnError: true,
+    onHedge: ({ index, afterMs }) => void [index, afterMs],
+    onWinner: (index) => void index,
+    signal,
+  });
+  const api = createFetch({ hedge: { delayMs: "auto", percentile: 0.9, minDelayMs: 25, fallbackDelayMs: 400, minSamples: 5, maxHedges: 1, methods: ["GET"] } });
+  await api("/x", { hedge: false });
+  await api("/x", { hedge: { delayMs: 150 } });
+  createFetch({ hedge: true, onEvent: (e) => { if (e.type === "hedge") void e.index; if (e.type === "response") void [e.hedges, e.hedgeWon]; } });
+  return body.status;
+}

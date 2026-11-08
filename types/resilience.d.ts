@@ -169,3 +169,26 @@ export interface CircuitBreaker {
 }
 
 export function createCircuitBreaker(opts?: CircuitBreakerOptions): CircuitBreaker;
+
+export interface HedgeOptions<T = any> {
+  /** Wait before launching backup #index (1-based): a number of ms, or a function of the index. */
+  delayMs: number | ((index: number) => number);
+  /** How many backups at most. Default 1. */
+  maxHedges?: number;
+  /** Results that count as failed (and launch the next backup at once). Default: `result.status >= 500`. */
+  isFailure?: (result: T) => boolean;
+  /** Launch the next backup immediately when an attempt throws. Default true. */
+  hedgeOnError?: boolean;
+  /** A backup was launched. */
+  onHedge?: (info: { index: number; afterMs: number }) => void;
+  /** Which attempt produced the result (0 = the original). */
+  onWinner?: (index: number) => void;
+  /** Cancels everything; rejects with the signal's reason. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Hedged requests: if `fn` hasn't answered after `delayMs`, start a backup and take whichever
+ * succeeds first; the others are aborted. Only hedge calls that are safe to run twice.
+ */
+export function withHedge<T>(fn: (signal: AbortSignal, index: number) => Promise<T> | T, opts: HedgeOptions<T>): Promise<T>;

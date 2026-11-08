@@ -53,6 +53,11 @@ export interface CreateFetchDefaults {
    * `trustedOrigins` there's nothing to compare against and credentials go everywhere.
    */
   trustedOrigins?: string[];
+  /**
+   * Send a backup request when an attempt is slow and take whichever answers first
+   * (idempotent methods, or requests with an Idempotency-Key). `true` = delayMs "auto".
+   */
+  hedge?: boolean | HedgeConfig;
   /** Attach a token and, on a 401, refresh it once (shared by all concurrent requests) and replay. */
   auth?: AuthOptions;
   /** In-memory GET cache with TTL, stale-while-revalidate and ETag/Last-Modified revalidation. `true` = 60s TTL. */
@@ -76,6 +81,8 @@ export interface ReqkitRequestInit extends Omit<RequestInit, "headers" | "cache"
   timeout?: number | false;
   retry?: false | CreateFetchRetryOptions;
   throwHttpErrors?: boolean;
+  /** `false` disables hedging for this call; an object overrides the defaults. */
+  hedge?: boolean | HedgeConfig;
   /** `false`/"no-store" bypass the cache; "reload" skips the read but refreshes the entry. */
   cache?: false | "no-store" | "reload";
 }
@@ -104,6 +111,23 @@ export interface MemoryCache extends CacheStore {
 }
 
 export function createMemoryCache(opts?: { maxEntries?: number }): MemoryCache;
+
+export interface HedgeConfig {
+  /** Milliseconds before a backup is sent, or "auto" (default) to use your own recent latency. */
+  delayMs?: number | "auto";
+  /** Backups per attempt. Default 1. */
+  maxHedges?: number;
+  /** Methods that may be hedged. Default: the idempotent ones (GET, HEAD, OPTIONS, PUT, DELETE). */
+  methods?: string[];
+  /** For "auto": which percentile of recent latency to wait for. Default 0.95. */
+  percentile?: number;
+  /** For "auto": never hedge sooner than this. Default 20. */
+  minDelayMs?: number;
+  /** For "auto": the delay used until `minSamples` responses were seen. Default 300. */
+  fallbackDelayMs?: number;
+  /** For "auto": samples needed before trusting the percentile. Default 10. */
+  minSamples?: number;
+}
 
 export interface CacheEvent {
   type: "hit" | "stale" | "revalidated" | "miss" | "store" | "stale-if-error";
@@ -172,8 +196,13 @@ export type FetchEvent =
       attempts: number;
       /** How the cache was involved, if it was. */
       cache?: "hit" | "stale" | "revalidated" | "miss" | "stale-if-error";
+      /** Backup requests sent for this call. */
+      hedges: number;
+      /** True when a backup request produced the response. */
+      hedgeWon: boolean;
     }
-  | { type: "error"; url?: string; method?: string; error: unknown; durationMs: number; attempts: number }
+  | { type: "error"; url?: string; method?: string; error: unknown; durationMs: number; attempts: number; hedges: number }
+  | { type: "hedge"; url: string; method: string; /** 1-based backup number */ index: number; /** ms since the call's attempt began */ afterMs: number }
   | { type: "cache"; url: string; method: "GET"; event: CacheEvent["type"] }
   | { type: "ratelimit"; url: string; method: string; waitedMs: number }
   | { type: "circuit"; origin: string; state: CircuitState; previous: CircuitState }

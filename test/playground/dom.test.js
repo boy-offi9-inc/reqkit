@@ -63,7 +63,7 @@ test("playground/index.html's inline script renders every demo and the Run butto
     // keep `document` until the click below has run
   }
 
-  assert.equal(container.children.length, 11, "one card per demo");
+  assert.equal(container.children.length, 12, "one card per demo");
   const titles = container.children.map((card) => card.children[0].textContent);
   assert.ok(titles.includes("Retry that obeys Retry-After"));
 

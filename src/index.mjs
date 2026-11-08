@@ -5,6 +5,7 @@ export const {
   RetryAbortedError,
   StopRetry,
   withTimeout,
+  withHedge,
   TimeoutError,
   normalizeError,
   parseJsonSafe,

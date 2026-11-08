@@ -1,5 +1,6 @@
 const { withRetry, RetryAbortedError, StopRetry } = require("./resilience/retry");
 const { withTimeout, TimeoutError } = require("./resilience/timeout");
+const { withHedge } = require("./resilience/hedge");
 const { normalizeError } = require("./errors/normalizeError");
 const { parseJsonSafe } = require("./http/parseJsonSafe");
 const { buildQuery } = require("./http/buildQuery");
@@ -22,6 +23,7 @@ module.exports = {
   RetryAbortedError,
   StopRetry,
   withTimeout,
+  withHedge,
   TimeoutError,
   normalizeError,
   parseJsonSafe,

@@ -434,6 +434,53 @@ await api.json("/config"); // server is down? still works`,
   },
 
   {
+    id: "hedge",
+    title: "Hedged requests",
+    blurb: "One request in a while is slow. After 120 ms reqkit sends a backup and takes whichever answers first; the slow one is cancelled so nothing is left hanging.",
+    code: `const api = createFetch({
+  hedge: { delayMs: 120 },
+});
+await api.json("/search?q=reqkit");`,
+    async run(log, { scale = 1 } = {}) {
+      const { say } = makeClock(log);
+      let calls = 0;
+      let cancelled = false;
+      const mock = createMockFetch();
+      mock.get("/search").replyWith(async (call) => {
+        const isSlow = ++calls === 1;
+        const ms = (isSlow ? 700 : 40) * scale;
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(resolve, ms);
+          call.signal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            if (isSlow) {
+              cancelled = true;
+              say("   ✂ the slow request was cancelled");
+            }
+            reject(call.signal.reason);
+          });
+        });
+        return { status: 200, body: { from: isSlow ? "slow server" : "backup request" } };
+      });
+
+      let hedgeWon = false;
+      const api = createFetch({
+        baseUrl: "https://api.demo",
+        fetch: traced(mock.fetch, say),
+        retry: false,
+        hedge: { delayMs: 120 * scale },
+        onEvent: (e) => {
+          if (e.type === "hedge") say(`   ⏱ no answer after ${Math.round(e.afterMs)}ms → sending backup #${e.index}`);
+          if (e.type === "response") hedgeWon = e.hedgeWon;
+        },
+      });
+      const data = await api.json("/search");
+      say(`✓ answered by the ${data.from} — slow request ${cancelled ? "cancelled" : "still running"}`);
+      return { from: data.from, requests: mock.calls.length, hedgeWon, cancelled };
+    },
+  },
+
+  {
     id: "resume",
     title: "Resumable download",
     blurb: "The connection drops at ~45%. Instead of starting over, reqkit resumes with a Range request from the exact byte it stopped at.",
