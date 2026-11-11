@@ -23,10 +23,24 @@ function isAbsoluteUrl(url) {
   return /^[a-z][a-z0-9+.-]*:/i.test(url);
 }
 
+// Plain scans instead of /\/+$/ and /^\/+/: a regex that ends in a quantified
+// class backtracks quadratically on a long run of slashes followed by something else.
+function trimTrailingSlashes(str) {
+  let end = str.length;
+  while (end > 0 && str.charCodeAt(end - 1) === 47) end--;
+  return str.slice(0, end);
+}
+
+function trimLeadingSlashes(str) {
+  let start = 0;
+  while (start < str.length && str.charCodeAt(start) === 47) start++;
+  return str.slice(start);
+}
+
 function joinUrl(baseUrl, url, query) {
   let full = String(url);
   if (baseUrl && !isAbsoluteUrl(full)) {
-    full = `${String(baseUrl).replace(/\/+$/, "")}/${full.replace(/^\/+/, "")}`;
+    full = `${trimTrailingSlashes(String(baseUrl))}/${trimLeadingSlashes(full)}`;
   }
   const qs = query ? buildQuery(query) : "";
   if (qs) full += (full.includes("?") ? "&" : "?") + qs;
