@@ -5,3 +5,4 @@ export * from "./http";
 export * from "./streams";
 export * from "./pagination";
 export * from "./testing";
+export * from "./security";

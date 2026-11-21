@@ -20,6 +20,6 @@ reqkit processes data a server controls and carries credentials, so these are in
 - denial of service from hostile input: unbounded memory or super-linear parsing in header, SSE, NDJSON or line readers
 - a retry repeating a non-idempotent request unexpectedly
 
-Out of scope: SSRF protection for server-side use (reqkit does not resolve DNS or block private addresses, so validate user-supplied URLs yourself) and bugs in third-party HTTP clients used alongside reqkit.
+Out of scope: SSRF protection is available as an **opt-in** feature (`createFetch`'s `ssrfGuard` option — see README "SSRF guard"); when the guard is not enabled, reqkit does not resolve DNS or block private addresses, so validate user-supplied URLs yourself. Bugs in third-party HTTP clients used alongside reqkit are also out of scope.
 
 The protections already in place are described in the [Security section of the README](./README.md#security).

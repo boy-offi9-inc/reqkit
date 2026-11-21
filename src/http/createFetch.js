@@ -7,6 +7,7 @@ const { buildQuery } = require("./buildQuery");
 const { parseJsonSafe } = require("./parseJsonSafe");
 const { normalizeError } = require("../errors/normalizeError");
 const { HTTPError } = require("../errors/HTTPError");
+const { createSsrfGuard } = require("../security/ssrfGuard");
 const { createRateLimiter } = require("../resilience/rateLimiter");
 const { createCircuitBreaker } = require("../resilience/circuitBreaker");
 const { createMemoryCache } = require("./cache/memoryCache");
@@ -179,12 +180,18 @@ function createFetch(defaults = {}) {
     dedupe = false,
     throwHttpErrors: defaultThrow = true,
     fetch: customFetch,
+    ssrfGuard,
     onRequest,
     onResponse,
     onEvent,
   } = defaults;
 
-  const doFetch = (...args) => (customFetch || globalThis.fetch)(...args);
+    let guardedFetchImpl = null;
+  if (ssrfGuard) {
+    const { createSsrfGuard } = require("../security/ssrfGuard");
+    guardedFetchImpl = createSsrfGuard(typeof ssrfGuard === "object" ? ssrfGuard : {}).guardedFetch(customFetch || globalThis.fetch);
+  }
+  const doFetch = (...args) => (guardedFetchImpl || customFetch || globalThis.fetch)(...args);
 
   // A throwing (or rejecting) handler must never break a request.
   const emitEvent = (event) => {

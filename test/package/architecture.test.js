@@ -15,10 +15,11 @@ const ALLOWED = {
   internal: [],
   errors: ["internal"],
   resilience: ["internal", "errors"],
-  http: ["internal", "errors", "resilience"],
+  http: ["internal", "errors", "resilience", "security"],
   streams: ["internal", "errors"],
   pagination: ["internal", "errors"],
   testing: ["internal"],
+  security: ["internal", "errors"],
 };
 const LAYERS = Object.keys(ALLOWED);
 

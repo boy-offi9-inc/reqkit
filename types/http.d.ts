@@ -65,6 +65,12 @@ export interface CreateFetchDefaults {
   auth?: AuthOptions;
   /** In-memory GET cache with TTL, stale-while-revalidate and ETag/Last-Modified revalidation. `true` = 60s TTL. */
   cache?: boolean | CacheOptions;
+  /**
+   * Refuse requests to private / loopback / link-local / cloud-metadata targets
+   * and re-check every redirect hop (redirects are then followed by reqkit).
+   * Opt-in: it changes redirect semantics. `true` = default options.
+   */
+  ssrfGuard?: boolean | import("./security").SsrfGuardOptions;
   /** Merge identical concurrent GET/HEAD calls. Default false. */
   dedupe?: boolean;
   /** Throw HTTPError on non-2xx. Default true. */

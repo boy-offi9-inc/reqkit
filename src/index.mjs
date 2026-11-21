@@ -22,6 +22,8 @@ export const {
   HTTPError,
   createRateLimiter,
   createCircuitBreaker,
+  createSsrfGuard,
+  SSRFBlockedError,
   CircuitOpenError,
   createMemoryCache,
   createMockFetch,

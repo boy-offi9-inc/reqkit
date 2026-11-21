@@ -14,6 +14,7 @@ src/
   streams/              line/NDJSON/SSE readers, streamSSE, progress, resumable downloads
   pagination/           paginate, paginateLinks, parseLinkHeader
   testing/              createMockFetch
+  security/             SSRF guard (opt-in: createSsrfGuard, ssrfGuard option)
 types/                  hand-written .d.ts, one file per layer
 test/                   mirrors src/
 playground/             the interactive demo

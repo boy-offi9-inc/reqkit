@@ -6,7 +6,9 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@boy-offi9-inc/reqkit"><img src="https://img.shields.io/npm/v/@boy-offi9-inc/reqkit?color=CB3837&logo=npm&logoColor=white" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/@boy-offi9-inc/reqkit"><img src="https://img.shields.io/npm/dm/@boy-offi9-inc/reqkit" alt="npm downloads"></a>
   <a href="https://github.com/boy-offi9-inc/reqkit/actions/workflows/ci.yml"><img src="https://github.com/boy-offi9-inc/reqkit/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/boy-offi9-inc/reqkit/releases"><img src="https://img.shields.io/github/v/release/boy-offi9-inc/reqkit?include_prereleases&color=8B5CF6" alt="GitHub release"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node >=18">
   <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Zero dependencies">
@@ -75,6 +77,7 @@ Requires Node 18+. TypeScript types are included.
 | Run N things at a time | [`createLimiter`](#createlimiterconcurrency) |
 | Slow down *before* the server says 429 (obey `X-RateLimit-*`) | [`createRateLimiter`](#createratelimiteropts) |
 | Stop hammering a service that keeps failing | [`createCircuitBreaker`](#createcircuitbreakeropts) |
+| Block user-supplied URLs from reaching internal networks (SSRF) | [`createFetch` → `ssrfGuard`](#security) |
 | Cache GETs (TTL, stale-while-revalidate, stale-if-error, ETag/304) | [`createFetch` → `cache`](#caching) |
 | Cut tail latency with backup requests | [`withHedge`](#withhedgefn-opts) / [`createFetch` → `hedge`](#hedged-requests) |
 | Log or measure every request, retry and cache hit | [`createFetch` → `onEvent`](#events-and-logging) |
@@ -93,35 +96,6 @@ Requires Node 18+. TypeScript types are included.
 - **Safe by default.** Retries only touch idempotent methods, credentials never leave your origin, and parsers bound their memory and time on hostile input.
 - **Errors that make sense.** Node's `TypeError: fetch failed`, the browser's `Failed to fetch`, axios and undici errors all normalize to one shape, and a deliberate abort is never reported as a timeout.
 - **Zero dependencies**, CommonJS and ESM, hand-written TypeScript types.
-
-## Conformance
-
-The open [fetch-kit/http-resilience](https://github.com/fetch-kit/http-resilience) matrix runs every
-library against scripted failure scenarios (retry, timeout, circuit, hedge, bulkhead, dedupe, and the
-interactions between them). reqkit is registered for the scenarios it implements and passes all of them:
-
-| Library | Scenarios passed |
-|---|---|
-| **reqkit** | **11 / 11** |
-| ky | 8 / 8 |
-| ffetch | 18 / 19 |
-| @resili/fetch | 13 / 18 |
-| flowshield | 13 / 16 |
-| fetch-smartly | 11 / 12 |
-| resilient-fetch-client | 7 / 12 |
-| fetch-resilience | 7 / 11 |
-| wretch | 6 / 9 |
-| ts-retry-circuit | 8 / 9 |
-| ofetch | 5 / 6 |
-| fetch-retry | 5 / 6 |
-
-Reproduce with the adapter in `adapters/reqkit.ts` of the matrix repository: install reqkit locally and
-point the matrix at it. Two behaviours these scenarios pin that are easy to get wrong:
-
-- A retry budget (`totalDeadlineMs`) is a **total** budget across attempts *and* waits, and it bounds the
-  caller's promise even when the operation ignores signals.
-- A success admitted before a circuit re-opened must not close the new cooldown — reqkit tracks a
-  generation per open.
 
 ## Runtime support
 
@@ -156,7 +130,27 @@ reqkit handles data a server controls (headers, streams, redirects), so the defa
 - **Bounded input.** `readLines`, `readNDJSON` and `readSSE` run in linear time and throw `LINE_TOO_LONG` past `maxLineLength` (default 16 Mi characters); `parseLinkHeader` ignores headers over 64 KB; `withProgress` and `downloadResumable` accept `maxBytes`.
 - **Safe retries.** `createFetch` retries only idempotent methods (or requests carrying an `Idempotency-Key`). Cross-origin redirects are left to `fetch`, which strips `Authorization`.
 
-reqkit does not block requests to private or internal addresses. If you fetch user-supplied URLs on a server, validate them first. To report a vulnerability, see [SECURITY.md](./SECURITY.md).
+### SSRF guard (opt-in)
+
+For a server that fetches user-supplied URLs, `ssrfGuard: true` refuses targets in private, loopback,
+link-local and cloud-metadata space, and it re-checks **every** redirect hop — with the guard on, reqkit
+follows redirects itself (`redirect: "manual"`) so a redirect cannot silently hop into your internal
+network:
+
+```js
+const api = createFetch({ ssrfGuard: true });
+
+await api("http://169.254.169.254/latest/meta-data/"); // throws SSRFBlockedError (private-address)
+await api("file:///etc/passwd");                        // throws SSRFBlockedError (scheme-file)
+```
+
+- Blocked ranges: `0.0.0.0/8`, `10/8`, `127/8`, `169.254/16` (incl. `169.254.169.254`), `172.16/12`, `192.168/16`, `100.64/10`, multicast/reserved, IPv6 `::`, `::1`, `fe80::/10`, `fc00::/7`, IPv4-mapped forms, plus `localhost` and the cloud metadata hostnames.
+- Hostnames are resolved (Node only) and **fail closed**: a resolution failure surfaces as the DNS error rather than slipping through. Bun/Deno/Workers have no resolver, so only literal and redirect checks apply there — pair the guard with an egress proxy in those runtimes.
+- Every hop is checked again, up to `maxRedirects` (default 5); past that you get `SSRFBlockedError` (`too-many-redirects`).
+- Escape hatches for development: `ssrfGuard: { allowHosts: ["localhost"] }` or `allowPrivate: true`. Both are explicit, per client.
+- The guard is **off by default** because it changes redirect semantics; `createSsrfGuard()` is also exported if you want the checks without `createFetch`.
+
+To report a vulnerability, see [SECURITY.md](./SECURITY.md).
 
 ---
 

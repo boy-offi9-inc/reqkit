@@ -183,7 +183,7 @@ import { createFetch } from "npm:@boy-offi9-inc/reqkit";
 import { createFetch } from "@boy-offi9-inc/reqkit";
 
 // Browser, no build step — pin the version
-import { createFetch } from "https://cdn.jsdelivr.net/npm/@boy-offi9-inc/reqkit@0.5.0/dist/reqkit.mjs";
+import { createFetch } from "https://cdn.jsdelivr.net/npm/@boy-offi9-inc/reqkit/dist/reqkit.mjs";
 ```
 
 Notes: in Workers the in-memory cache and rate limiter live **per isolate**, so treat them as best-effort or pass a `store` backed by KV / Durable Objects. In browsers, `cache` is separate from the HTTP cache the browser already keeps. Node 18+ is the primary, fully tested target; CI also smoke-tests the bundle on Deno, Bun and headless Chromium (those jobs are new — if one is red, open an issue).

@@ -11,6 +11,7 @@ const { createLimiter } = require("./resilience/limiter");
 const { createFetch, HTTPError } = require("./http/createFetch");
 const { createRateLimiter } = require("./resilience/rateLimiter");
 const { createCircuitBreaker, CircuitOpenError } = require("./resilience/circuitBreaker");
+const { createSsrfGuard, SSRFBlockedError } = require("./security/ssrfGuard");
 const { createMemoryCache } = require("./http/cache/memoryCache");
 const { createMockFetch } = require("./testing/createMockFetch");
 const { downloadResumable } = require("./streams/download");
@@ -40,6 +41,8 @@ module.exports = {
   HTTPError,
   createRateLimiter,
   createCircuitBreaker,
+  createSsrfGuard,
+  SSRFBlockedError,
   CircuitOpenError,
   createMemoryCache,
   createMockFetch,
