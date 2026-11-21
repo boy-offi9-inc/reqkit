@@ -138,6 +138,14 @@ async function withRetry(fn, opts = {}) {
   }
 
   function wantsResultRetry(result, attempt) {
+    // The caller's predicate runs FIRST for failure results so it can veto
+    // built-in status-list retries (or, as createFetch does for non-replayable
+    // stream bodies, throw an explicit refusal). Successful responses are never
+    // retried and never shown to the predicate.
+    const statusOk =
+      result && typeof result.status === "number" && result.status >= 200 && result.status < 300;
+    if (shouldRetryResult && !statusOk) return Boolean(shouldRetryResult(result, attempt));
+    if (statusOk) return false;
     if (
       retryStatusCodes.length > 0 &&
       result &&

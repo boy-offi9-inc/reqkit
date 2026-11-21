@@ -338,7 +338,7 @@ test("createFetch runs onRequest / onResponse hooks and accepts a custom fetch",
   assert.deepEqual(events, ["req", "res:200"]);
 });
 
-test("createFetch does not retry a stream body", async () => {
+test("createFetch refuses explicitly instead of silently skipping the retry for a one-shot stream body", async () => {
   let attempts = 0;
   const fakeFetch = async () => {
     attempts++;
@@ -346,6 +346,17 @@ test("createFetch does not retry a stream body", async () => {
   };
   const api = createFetch({ fetch: fakeFetch, retry: { ...FAST, methods: ["POST"] } });
   const body = new ReadableStream({ start: (c) => (c.enqueue(new Uint8Array([1])), c.close()) });
-  await assert.rejects(api("https://x.test/", { method: "POST", body, duplex: "half" }), HTTPError);
+  // One attempt goes out; when a retry would need the consumed body, the
+  // refusal is EXPLICIT (TypeError) rather than a silent downgrade to
+  // no-retry that returns the raw HTTPError.
+  await assert.rejects(
+    api("https://x.test/", { method: "POST", body, duplex: "half" }),
+    (err) => {
+      assert.equal(err.name, "BodyReplayError");
+      assert.ok(err instanceof TypeError);
+      assert.match(err.message, /cannot be replayed/);
+      return true;
+    }
+  );
   assert.equal(attempts, 1);
 });

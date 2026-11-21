@@ -1,4 +1,4 @@
-const { withRetry, RetryAbortedError } = require("../resilience/retry");
+const { withRetry, RetryAbortedError, DeadlineError } = require("../resilience/retry");
 const { withTimeout } = require("../resilience/timeout");
 const { withDedupe } = require("../resilience/dedupe");
 const { withHedge } = require("../resilience/hedge");
@@ -322,6 +322,13 @@ function createFetch(defaults = {}) {
     cacheCfg && cacheCfg.staleIfError > 0 && Date.now() - entry.storedAt < cacheCfg.ttl + cacheCfg.staleIfError;
 
   async function execute(input, init, state) {
+    // Accept a Request object as input (fetch semantics): its url, method,
+    // headers and body become the defaults; explicit init options win.
+    if (input && typeof input === "object" && typeof input.url === "string" && typeof input.method === "string" && typeof input.clone === "function") {
+      const req = input;
+      init = { method: req.method, headers: req.headers, body: req.body ?? undefined, duplex: "half", ...(init || {}) };
+      input = req.url;
+    }
     const {
       query,
       json,
@@ -378,11 +385,34 @@ function createFetch(defaults = {}) {
     const retryCfg = retryOpt === false || defaultRetry === false ? false : { ...defaultRetry, ...retryOpt };
     const methods = (retryCfg && retryCfg.methods) || DEFAULT_RETRY_METHODS;
     const hasIdempotencyKey = finalHeaders.has("idempotency-key");
-    const canRetry =
-      retryCfg !== false &&
-      !isStreamBody(ctx.init.body) && // a consumed stream can't be replayed
+    const retryableMethod =
       (methods.map((m) => m.toUpperCase()).includes(finalMethod) || hasIdempotencyKey);
-    const { statusCodes, methods: _methods, retries = 2, shouldRetry: customShouldRetry, ...retryRest } = retryCfg || {};
+    // A consumed stream can't be replayed. The first attempt always goes out;
+    // if a retry would then need the consumed body, refuse EXPLICITLY instead
+    // of silently downgrading to no-retry — silent skipping hides the loss of
+    // the retry guarantee the caller opted into.
+    const streamBodyNeedsReplay = retryCfg !== false && retryableMethod && isStreamBody(ctx.init.body);
+    const canRetry = retryCfg !== false && retryableMethod && !isStreamBody(ctx.init.body);
+const { statusCodes, methods: _methods, retries = 2, shouldRetry: customShouldRetry, shouldRetryResult: customShouldRetryResult, ...retryRest } = retryCfg || {};
+
+    // When a total retry deadline is configured, compose it into the caller's
+    // signal: the deadline must genuinely CANCEL the in-flight attempt (the
+    // attempt observes `signal`), not just stop dispatches. An uncooperative
+    // transport left running past the deadline is a request nobody waits for.
+    let networkSignal = signal;
+    let retryDeadlineTimer = null;
+    if (retryRest.totalDeadlineMs !== undefined && Number.isFinite(retryRest.totalDeadlineMs)) {
+      const deadlineController = new AbortController();
+      retryDeadlineTimer = setTimeout(
+        () => deadlineController.abort(new DeadlineError(retryRest.totalDeadlineMs)),
+        retryRest.totalDeadlineMs
+      );
+      if (signal) {
+        if (signal.aborted) deadlineController.abort(signal.reason);
+        else signal.addEventListener("abort", () => deadlineController.abort(signal.reason), { once: true });
+      }
+      networkSignal = deadlineController.signal;
+    }
 
     // --- hedging policy ----------------------------------------------------
     const hedgeCfg =
@@ -409,6 +439,13 @@ function createFetch(defaults = {}) {
     // `netSignal` are parameters so background revalidation can reuse this.
     function network(netHeaders, netSignal) {
       const attemptOnce = () => {
+        if (state.attempts > 0 && streamBodyNeedsReplay) {
+          const refusal = new TypeError(
+            "reqkit: this request needs a retry, but its body is a one-shot stream that was consumed by the first attempt and cannot be replayed. Buffer the body, pass an Idempotency-Key with retry disabled, or set retry: false."
+          );
+          refusal.name = "BodyReplayError"; // never classified as a network error -> never retried
+          throw refusal;
+        }
         state.attempts++;
         emitEvent({ type: "attempt", url: ctx.url, method: finalMethod, attempt: state.attempts });
         // A single request: rate limit → per-attempt timeout → fetch. `sig` is what cancels it —
@@ -463,7 +500,7 @@ function createFetch(defaults = {}) {
         return breaker ? breaker.run(attempt) : attempt();
       };
 
-      return canRetry
+      return (canRetry || streamBodyNeedsReplay)
         ? withRetry(attemptOnce, {
             ...retryRest,
             retries,
@@ -487,6 +524,24 @@ function createFetch(defaults = {}) {
                 const n = normalizeError(err);
                 return n.isNetworkError || n.isTimeout;
               }),
+            // A retryable RESULT (e.g. 503) on a request whose body is a one-shot
+            // stream: refuse explicitly rather than silently returning the failure
+            // without retrying — the caller opted into retries, silence hides it.
+            shouldRetryResult: (result) => {
+              const status = result && (result.status ?? null);
+              const codes = statusCodes || DEFAULT_RETRY_STATUS_CODES;
+              if (status != null && codes.includes(status) && streamBodyNeedsReplay) {
+                const refusal = new TypeError(
+                  "reqkit: this request needs a retry, but its body is a one-shot stream that was consumed by the first attempt and cannot be replayed. Buffer the body, pass an Idempotency-Key with retry disabled, or set retry: false."
+                );
+                refusal.name = "BodyReplayError"; // never classified as a network error -> never retried
+                throw refusal;
+              }
+              // A caller-supplied predicate keeps its say: it runs after the
+              // refusal check and can veto or extend the built-in status list.
+              if (customShouldRetryResult) return Boolean(customShouldRetryResult(result));
+              return status != null && codes.includes(status);
+            },
             signal: netSignal,
           })
         : attemptOnce();
@@ -577,10 +632,12 @@ function createFetch(defaults = {}) {
     // --- network -------------------------------------------------------------
     let response;
     try {
-      response = await network(useCache ? conditionalHeaders(entry) : finalHeaders, signal);
+      response = await network(useCache ? conditionalHeaders(entry) : finalHeaders, networkSignal);
     } catch (err) {
       // Present a user abort as the plain AbortError they caused, not as retry internals.
       if (err instanceof RetryAbortedError && signal && signal.aborted) throw signal.reason ?? err;
+      // Surface the retry deadline as its own error, not retry internals.
+      if (err instanceof DeadlineError || (err && err.name === "DeadlineError")) throw err;
       // The network failed but we still hold a usable copy: serve it (never for a deliberate abort).
       if (entry && withinStaleIfError(entry) && !(signal && signal.aborted) && !(err && err.name === "AbortError")) {
         emit("stale-if-error", ctx.url);
@@ -600,7 +657,7 @@ function createFetch(defaults = {}) {
         entry = null; // belongs to the old token's cache key
         if (useCache) key = cacheKey(finalMethod, ctx.url, finalHeaders);
         try {
-          response = await network(finalHeaders, signal);
+          response = await network(finalHeaders, networkSignal);
         } catch (err) {
           if (err instanceof RetryAbortedError && signal && signal.aborted) throw signal.reason ?? err;
           throw err;
@@ -631,6 +688,7 @@ function createFetch(defaults = {}) {
       }
     }
 
+    if (retryDeadlineTimer !== null) clearTimeout(retryDeadlineTimer);
     return finish(response);
   }
 
