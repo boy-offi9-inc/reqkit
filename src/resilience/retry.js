@@ -40,6 +40,14 @@ class StopRetry extends Error {
  * @param {number} [opts.maxRetryTime=Infinity] - total time budget in ms
  *   across all attempts and waits; once the next wait would blow it, stop
  *   and surface the last error/result
+ * @param {number} [opts.totalDeadlineMs=Infinity] - hard deadline in ms from
+ *   the start of the loop that covers EVERYTHING: in-flight attempts, backoff
+ *   waits and Retry-After waits alike. When it expires, the in-flight `fn`
+ *   is aborted via `opts.fnSignal` (if provided) and the loop settles with
+ *   `DeadlineError` (or the caller signal's reason). Unlike `maxRetryTime`,
+ *   which only checks before scheduling a wait, this is enforced *while*
+ *   waiting and while an attempt is in flight, so no dispatch can start —
+ *   and no attempt can outlive — the deadline.
  * @param {(err: any, attempt: number) => boolean} [opts.shouldRetry] - for thrown errors
  * @param {number[]} [opts.retryStatusCodes=[]] - retry when the result's `.status` is in this list
  * @param {(result: any, attempt: number) => boolean} [opts.shouldRetryResult] - retry on any result predicate
@@ -53,7 +61,19 @@ class StopRetry extends Error {
  *   including any pending backoff wait, throwing RetryAbortedError (with the
  *   last failure as `cause`). Separate from a per-call signal you pass into
  *   `fn` yourself — this one governs whether *another attempt starts at all*.
+ * @param {AbortSignal} [opts.fnSignal] - the signal `fn` itself observes
+ *   (the per-attempt signal). When `totalDeadlineMs` expires, this signal is
+ *   aborted so the in-flight attempt is actually cancelled, not abandoned.
  */
+class DeadlineError extends Error {
+  constructor(ms) {
+    super(`Retry loop exceeded its ${ms}ms total deadline`);
+    this.name = "DeadlineError";
+    this.code = "EDEADLINE";
+    this.deadlineMs = ms;
+  }
+}
+
 async function withRetry(fn, opts = {}) {
   const {
     retries = 3,
@@ -62,6 +82,8 @@ async function withRetry(fn, opts = {}) {
     factor = 2,
     jitter = 0.2,
     maxRetryTime = Infinity,
+    totalDeadlineMs = Infinity,
+    fnSignal,
     shouldRetry = defaultShouldRetry,
     retryStatusCodes = [],
     shouldRetryResult,
@@ -73,6 +95,27 @@ async function withRetry(fn, opts = {}) {
   } = opts;
 
   const startedAt = Date.now();
+  const deadlineAt = totalDeadlineMs === Infinity ? Infinity : startedAt + totalDeadlineMs;
+  // The deadline shares plumbing with the caller signal: build an internal
+  // controller and link the caller's signal into it, so every wait and gate
+  // below reacts to whichever arrives first. Aborting that controller is what
+  // stops dispatches and interrupts waits; when the caller also derives the
+  // per-attempt signal from their own `signal` (the createFetch pattern), the
+  // in-flight attempt is cancelled by the deadline through that link.
+  let loopSignal = signal;
+  let deadlineTimer = null;
+  if (deadlineAt !== Infinity) {
+    const deadlineController = new AbortController();
+    deadlineTimer = setTimeout(
+      () => deadlineController.abort(new DeadlineError(totalDeadlineMs)),
+      totalDeadlineMs
+    );
+    if (signal) {
+      if (signal.aborted) deadlineController.abort(signal.reason);
+      else signal.addEventListener("abort", () => deadlineController.abort(signal.reason), { once: true });
+    }
+    loopSignal = deadlineController.signal;
+  }
 
   function backoff(attempt) {
     const exponential = Math.min(baseDelayMs * factor ** attempt, maxDelayMs);
@@ -107,41 +150,83 @@ async function withRetry(fn, opts = {}) {
   }
 
   let lastErr;
-  for (let attempt = 0; ; attempt++) {
-    if (signal?.aborted) {
-      throw new RetryAbortedError(lastErr);
+  try {
+    for (let attempt = 0; ; attempt++) {
+      if (loopSignal?.aborted) {
+        throwReasonOr(loopSignal.reason, new RetryAbortedError(lastErr));
+      }
+
+      let result;
+      try {
+        result = deadlineAt === Infinity
+          ? await fn(attempt)
+          : await Promise.race([
+              fn(attempt),
+              // The deadline bounds the CALLER's promise, not just dispatches:
+              // if the attempt is still in flight (or the fn ignores signals),
+              // the caller settles with DeadlineError at the deadline and the
+              // abandoned attempt's eventual outcome is discarded. Cooperative
+              // fn implementations (they observe the signal createFetch wires
+              // in) are genuinely cancelled; uncooperative ones are abandoned.
+              new Promise((_, reject) => {
+                const onDeadline = () => reject(loopSignal.reason);
+                if (loopSignal.aborted) onDeadline();
+                else loopSignal.addEventListener("abort", onDeadline, { once: true });
+              }),
+            ]);
+      } catch (err) {
+        // A deadline abort during an attempt is terminal — never retried.
+        if (loopSignal?.aborted) {
+          throwReasonOr(loopSignal.reason, new RetryAbortedError(err));
+        }
+        if (err instanceof StopRetry) throw err.original ?? err;
+        lastErr = err;
+        if (attempt >= retries || !shouldRetry(err, attempt)) throw err;
+
+        const waitMs = planWait(backoff(attempt), attempt, err, undefined);
+        if (waitMs === null) throw err;
+
+        if (onRetry) onRetry(err, attempt, waitMs, { reason: "error" });
+        await sleep(waitMs, loopSignal, err).catch((sleepErr) => {
+          // A deadline abort landing during this wait surfaces as DeadlineError;
+          // a caller abort stays RetryAbortedError (with the failure as cause).
+          if (loopSignal?.aborted) throwReasonOr(loopSignal.reason, sleepErr);
+          throw sleepErr;
+        });
+        continue;
+      }
+
+      if (attempt >= retries || !wantsResultRetry(result, attempt)) return result;
+
+      let defaultMs = backoff(attempt);
+      if (respectRetryAfter) {
+        const headerMs = getWaitMsFromHeaders(result && result.headers);
+        if (headerMs !== null) defaultMs = Math.min(headerMs, maxRetryAfterMs);
+      }
+      const waitMs = planWait(defaultMs, attempt, undefined, result);
+      if (waitMs === null) return result;
+
+      await discardBody(result);
+      if (onRetry) onRetry(undefined, attempt, waitMs, { reason: "result", result, status: result && result.status });
+      await sleep(waitMs, loopSignal).catch((sleepErr) => {
+        if (loopSignal?.aborted) throwReasonOr(loopSignal.reason, sleepErr);
+        throw sleepErr;
+      });
     }
-
-    let result;
-    try {
-      result = await fn(attempt);
-    } catch (err) {
-      if (err instanceof StopRetry) throw err.original ?? err;
-      lastErr = err;
-      if (attempt >= retries || !shouldRetry(err, attempt)) throw err;
-
-      const waitMs = planWait(backoff(attempt), attempt, err, undefined);
-      if (waitMs === null) throw err;
-
-      if (onRetry) onRetry(err, attempt, waitMs, { reason: "error" });
-      await sleep(waitMs, signal, err);
-      continue;
-    }
-
-    if (attempt >= retries || !wantsResultRetry(result, attempt)) return result;
-
-    let defaultMs = backoff(attempt);
-    if (respectRetryAfter) {
-      const headerMs = getWaitMsFromHeaders(result && result.headers);
-      if (headerMs !== null) defaultMs = Math.min(headerMs, maxRetryAfterMs);
-    }
-    const waitMs = planWait(defaultMs, attempt, undefined, result);
-    if (waitMs === null) return result;
-
-    await discardBody(result);
-    if (onRetry) onRetry(undefined, attempt, waitMs, { reason: "result", result, status: result && result.status });
-    await sleep(waitMs, signal);
+  } finally {
+    if (deadlineTimer !== null) clearTimeout(deadlineTimer);
   }
 }
 
-module.exports = { withRetry, RetryAbortedError, StopRetry };
+// The loop's terminal error: a caller abort surfaces as the caller's own
+// reason (plain AbortError); a deadline surfaces as DeadlineError.
+function throwReasonOr(reason, fallback) {
+  if (reason !== undefined && reason !== null && reason.name === "DeadlineError") throw reason;
+  if (reason !== undefined && reason !== null && reason.name !== "AbortError") {
+    // A caller-provided custom reason (any Error) wins over retry internals.
+    if (reason instanceof Error && reason.name !== "DeadlineError") throw reason;
+  }
+  throw fallback;
+}
+
+module.exports = { withRetry, RetryAbortedError, StopRetry, DeadlineError };

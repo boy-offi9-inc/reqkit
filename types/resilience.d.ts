@@ -29,6 +29,9 @@ export interface RetryOptions {
   jitter?: number | "full";
   /** Total time budget across attempts and waits, in ms. */
   maxRetryTime?: number;
+  /** Hard deadline (ms) covering in-flight attempts, backoff and Retry-After waits;
+   *  the caller settles with DeadlineError at the deadline and the attempt is cancelled. */
+  totalDeadlineMs?: number;
   /** For thrown errors. */
   shouldRetry?: (err: unknown, attempt: number) => boolean;
   /** Retry when the result's `.status` is in this list. */
@@ -57,6 +60,13 @@ export class RetryAbortedError extends Error {
   name: "RetryAbortedError";
   /** The last failure before the loop was aborted, if there was one. */
   cause?: unknown;
+}
+
+export class DeadlineError extends Error {
+  name: "DeadlineError";
+  code: "EDEADLINE";
+  /** The deadline that expired, in ms. */
+  deadlineMs: number;
 }
 
 export function withRetry<T>(fn: (attempt: number) => Promise<T>, opts?: RetryOptions): Promise<T>;

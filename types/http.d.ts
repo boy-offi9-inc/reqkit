@@ -22,6 +22,9 @@ export interface CreateFetchRetryOptions {
   factor?: number;
   jitter?: number | "full";
   maxRetryTime?: number;
+  /** Hard deadline (ms) covering in-flight attempts, backoff and Retry-After waits;
+   *  the caller settles with DeadlineError at the deadline and the attempt is cancelled. */
+  totalDeadlineMs?: number;
   shouldRetry?: (err: unknown, attempt: number) => boolean;
   calculateDelay?: RetryOptions["calculateDelay"];
   onRetry?: RetryOptions["onRetry"];

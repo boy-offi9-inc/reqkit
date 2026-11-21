@@ -1,4 +1,4 @@
-const { withRetry, RetryAbortedError, StopRetry } = require("./resilience/retry");
+const { withRetry, RetryAbortedError, StopRetry, DeadlineError } = require("./resilience/retry");
 const { withTimeout, TimeoutError } = require("./resilience/timeout");
 const { withHedge } = require("./resilience/hedge");
 const { normalizeError } = require("./errors/normalizeError");
@@ -20,6 +20,7 @@ const { paginate, paginatePages, paginateLinks, parseLinkHeader } = require("./p
 
 module.exports = {
   withRetry,
+  DeadlineError,
   RetryAbortedError,
   StopRetry,
   withTimeout,

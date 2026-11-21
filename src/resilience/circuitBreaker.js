@@ -43,11 +43,19 @@ function createCircuitBreaker(opts = {}) {
   let failures = 0;
   let openedAt = 0;
   let probes = 0;
+  // Generation counter: bumped every time the circuit opens. A success from a
+  // request admitted in generation N must not influence generation N+1 —
+  // otherwise a slow success arriving after a failed probe reopened the
+  // breaker would clear the flag/failures of the NEW cooldown and a health
+  // check would see "closed" while admission is still refused (the exact
+  // stale-state bug the conformance matrix catches in three libraries).
+  let generation = 0;
 
   function setState(next) {
     if (next === state) return;
     const prev = state;
     state = next;
+    if (next === "open") generation++;
     if (onStateChange) onStateChange(next, prev);
   }
 
@@ -73,7 +81,10 @@ function createCircuitBreaker(opts = {}) {
     if (failures >= failureThreshold) open();
   }
 
-  function recordSuccess() {
+  function recordSuccess(generationAtAdmission) {
+    // Stale success: admitted before the most recent open, resolved after.
+    // It belongs to a superseded generation — reset nothing, close nothing.
+    if (generationAtAdmission !== undefined && generationAtAdmission !== generation) return;
     failures = 0;
     if (state === "half-open") setState("closed");
   }
@@ -83,6 +94,9 @@ function createCircuitBreaker(opts = {}) {
     if (s === "open") {
       throw new CircuitOpenError(Math.max(0, resetTimeoutMs - (Date.now() - openedAt)));
     }
+    // Snapshot the generation at admission; the request may still be in
+    // flight when a failure elsewhere reopens the circuit.
+    const admittedGeneration = generation;
     let probing = false;
     if (s === "half-open") {
       if (probes >= halfOpenMax) throw new CircuitOpenError(0);
@@ -100,7 +114,7 @@ function createCircuitBreaker(opts = {}) {
     }
 
     if (isFailure(result, false)) recordFailure();
-    else recordSuccess();
+    else recordSuccess(admittedGeneration);
     return result;
   }
 

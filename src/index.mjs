@@ -3,6 +3,7 @@ import reqkit from "./index.js";
 export const {
   withRetry,
   RetryAbortedError,
+  DeadlineError,
   StopRetry,
   withTimeout,
   withHedge,

@@ -155,6 +155,7 @@ const res = await withRetry(() => fetch(url), { retryStatusCodes: [429, 500, 502
 | `factor` | `2` | backoff multiplier |
 | `jitter` | `0.2` | extra random fraction on top of the delay; `0` disables; `"full"` picks uniformly in `[0, delay]` (AWS "full jitter" — best when many clients retry at once) |
 | `maxRetryTime` | `Infinity` | total time budget across attempts and waits; once the next wait would blow it, the last error/result is surfaced |
+| `totalDeadlineMs` | `Infinity` | hard deadline covering attempts, backoff AND Retry-After waits; the in-flight attempt is cancelled and the caller settles with `DeadlineError` at the deadline |
 | `shouldRetry` | retries anything but AbortError | `(err, attempt) => boolean` — for thrown errors |
 | `retryStatusCodes` | `[]` | retry when `result.status` is in this list |
 | `shouldRetryResult` | — | `(result, attempt) => boolean` — retry on any result predicate |
@@ -531,7 +532,7 @@ const admin = api.extend({ headers: { "x-role": "admin" } }); // merges over the
 | `json` *(per request)* | — | serialized as the body, `content-type: application/json` set for you |
 | `timeout` | `30000` | per attempt, in ms; `false` disables |
 | `signal` *(per request)* | — | external abort; surfaces as a plain `AbortError`, never retried |
-| `retry` | see below | `false` disables; otherwise `{ retries, statusCodes, methods, baseDelayMs, maxDelayMs, factor, jitter, maxRetryTime, shouldRetry, calculateDelay, onRetry }` |
+| `retry` | see below | `false` disables; otherwise `{ retries, statusCodes, methods, baseDelayMs, maxDelayMs, factor, jitter, maxRetryTime, totalDeadlineMs, shouldRetry, calculateDelay, onRetry }` |
 | `rateLimit` | — | `true` just learns from `X-RateLimit-*` / `Retry-After`; `{ requests, perMs }` also enforces a budget; or pass a shared [`createRateLimiter`](#createratelimiteropts) |
 | `circuitBreaker` | — | `true` / options → one breaker **per origin**; or pass a shared [`createCircuitBreaker`](#createcircuitbreakeropts), or `(url) => breaker`. An open circuit stops retries immediately. |
 | `trustedOrigins` | — | extra origins that may receive the default credentials — see [Security](#security) |

@@ -132,7 +132,7 @@ function mergeDefaults(base, extra) {
  * @param {number | false} [defaults.timeout=30000] - per attempt, ms
  * @param {false | object} [defaults.retry] - false disables. Options:
  *   `retries`(2), `statusCodes`, `methods`, `baseDelayMs`, `maxDelayMs`,
- *   `factor`, `jitter`, `maxRetryTime`, `onRetry`, `calculateDelay`
+ *   `factor`, `jitter`, `maxRetryTime`, `totalDeadlineMs`, `onRetry`, `calculateDelay`
  * @param {boolean | object} [defaults.rateLimit] - `true` just learns from
  *   response headers; `{ requests, perMs }` also enforces a budget; or pass a
  *   createRateLimiter() instance to share one budget
