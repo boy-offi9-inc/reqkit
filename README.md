@@ -94,6 +94,35 @@ Requires Node 18+. TypeScript types are included.
 - **Errors that make sense.** Node's `TypeError: fetch failed`, the browser's `Failed to fetch`, axios and undici errors all normalize to one shape, and a deliberate abort is never reported as a timeout.
 - **Zero dependencies**, CommonJS and ESM, hand-written TypeScript types.
 
+## Conformance
+
+The open [fetch-kit/http-resilience](https://github.com/fetch-kit/http-resilience) matrix runs every
+library against scripted failure scenarios (retry, timeout, circuit, hedge, bulkhead, dedupe, and the
+interactions between them). reqkit is registered for the scenarios it implements and passes all of them:
+
+| Library | Scenarios passed |
+|---|---|
+| **reqkit** | **11 / 11** |
+| ky | 8 / 8 |
+| ffetch | 18 / 19 |
+| @resili/fetch | 13 / 18 |
+| flowshield | 13 / 16 |
+| fetch-smartly | 11 / 12 |
+| resilient-fetch-client | 7 / 12 |
+| fetch-resilience | 7 / 11 |
+| wretch | 6 / 9 |
+| ts-retry-circuit | 8 / 9 |
+| ofetch | 5 / 6 |
+| fetch-retry | 5 / 6 |
+
+Reproduce with the adapter in `adapters/reqkit.ts` of the matrix repository: install reqkit locally and
+point the matrix at it. Two behaviours these scenarios pin that are easy to get wrong:
+
+- A retry budget (`totalDeadlineMs`) is a **total** budget across attempts *and* waits, and it bounds the
+  caller's promise even when the operation ignores signals.
+- A success admitted before a circuit re-opened must not close the new cooldown — reqkit tracks a
+  generation per open.
+
 ## Runtime support
 
 | Runtime | |
