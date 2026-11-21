@@ -22,9 +22,16 @@ export interface CreateFetchRetryOptions {
   factor?: number;
   jitter?: number | "full";
   maxRetryTime?: number;
+  /** Honor Retry-After / X-RateLimit-Reset from the response. Default true. */
+  respectRetryAfter?: boolean;
+  /** Cap (ms) on a header-provided wait. Default 60000. */
+  maxRetryAfterMs?: number;
   /** Hard deadline (ms) covering in-flight attempts, backoff and Retry-After waits;
    *  the caller settles with DeadlineError at the deadline and the attempt is cancelled. */
   totalDeadlineMs?: number;
+  /** Retry when the response status is in this list. Same as `statusCodes`; kept for
+   *  parity with the resilience-layer option name. */
+  retryStatusCodes?: number[];
   shouldRetry?: (err: unknown, attempt: number) => boolean;
   calculateDelay?: RetryOptions["calculateDelay"];
   onRetry?: RetryOptions["onRetry"];
@@ -93,15 +100,17 @@ export interface ReqkitRequestInit extends Omit<RequestInit, "headers" | "cache"
   /** `false` disables hedging for this call; an object overrides the defaults. */
   hedge?: boolean | HedgeConfig;
   /** `false`/"no-store" bypass the cache; "reload" skips the read but refreshes the entry. */
-  cache?: false | "no-store" | "reload";
+  cache?: false | "no-store" | "reload" | (string & {});
+  /** Accept any method string (fetch allows custom methods beyond the standard set). */
+  method?: string;
 }
 
 export interface ReqkitFetch {
-  (input: string, init?: ReqkitRequestInit): Promise<Response>;
+  (input: string | Request, init?: ReqkitRequestInit): Promise<Response>;
   /** The `baseUrl` this instance was created with. */
   readonly baseUrl: string | undefined;
   /** Resolves to the parsed JSON body (null for an empty body). */
-  json<T = unknown>(input: string, init?: ReqkitRequestInit): Promise<T>;
+  json<T = unknown>(input: string | Request, init?: ReqkitRequestInit): Promise<T>;
   /** New instance with these defaults merged over the current ones. */
   extend(overrides?: CreateFetchDefaults): ReqkitFetch;
 }
